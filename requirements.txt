@@ -1,3 +1,5 @@
 streamlit
 pandas
-st-gsheets-connection
+openpyxl
+python-dateutil
+requests
