@@ -1,4 +1,3 @@
-cat << 'EOF' > app.py
 import streamlit as st
 import pandas as pd
 import datetime
@@ -163,4 +162,3 @@ billing_data = [
 ]
 st.table(pd.DataFrame(billing_data))
 st.info(f"💰 **ОБЩАЯ СУММА К СУТОЧНОМУ СПИСАНИЮ С БАЛАНСА КЛИЕНТА:** **{grand_total:.2f} ₽**")
-EOF
