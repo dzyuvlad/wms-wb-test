@@ -1,164 +1,193 @@
 import streamlit as st
 import pandas as pd
 import datetime
-import requests
 import io
-from dateutil import parser
 
-st.set_page_config(page_title="WMS Ручной Сток | Единый Баланс", layout="wide", page_icon="🌐")
+# Настройка страницы WMS
+st.set_page_config(page_title="WMS Ручной Период Биллинга", layout="wide", page_icon="🌐")
 
-st.title("🌐 WMS Фулфилмент: Ручной лимит FBS + Мультиканальный Единый Сток")
-st.write(f"Последняя синхронизация всех API: `{datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}`")
+st.title("📐 WMS Фулфилмент: Настройка произвольного периода биллинга")
+st.write(f"Текущее время системы: `{datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}`")
 
-if 'wms_initial_acceptance' not in st.session_state:
-    st.session_state.wms_initial_acceptance = 100  
-if 'wms_manual_fbs_limit' not in st.session_state:
-    st.session_state.wms_manual_fbs_limit = 20     
+# --- ИНИЦИАЛИЗАЦИЯ ДИНАМИЧЕСКОЙ БАЗЫ ТОВАРОВ И ИСТОРИИ ---
+if 'wms_inventory' not in st.session_state:
+    st.session_state.wms_inventory = {
+        'Коробка Обувная XL': {
+            'length_cm': 30.0, 'width_cm': 20.0, 'height_cm': 15.0,
+            'boxes': 5, 'pcs_in_box': 20, 'physical_stock': 100, 'fbs_limit': 20
+        },
+        'Чехол iPhone 15': {
+            'length_cm': 15.0, 'width_cm': 8.0, 'height_cm': 1.5,
+            'boxes': 2, 'pcs_in_box': 50, 'physical_stock': 100, 'fbs_limit': 30
+        }
+    }
 
-sku_name = "Коробка Обувная XL"
-l, w, h = 30.0, 20.0, 15.0
+# Исторический лог заказов для проверки ручного фильтра дат
+today_date = datetime.date.today()
+if 'wms_history_orders' not in st.session_state:
+    st.session_state.wms_history_orders = [
+        {"Дата": today_date, "Источник": "Wildberries", "№ Заказа": "WB-9901", "SKU": "Коробка Обувная XL"},
+        {"Дата": today_date, "Источник": "Ozon", "№ Заказа": "OZ-5502", "SKU": "Коробка Обувная XL"},
+        {"Дата": today_date - datetime.timedelta(days=2), "Источник": "Wildberries", "№ Заказа": "WB-9811", "SKU": "Чехол iPhone 15"},
+        {"Дата": today_date - datetime.timedelta(days=4), "Источник": "Ozon", "№ Заказа": "OZ-5412", "SKU": "Коробка Обувная XL"},
+        {"Дата": today_date - datetime.timedelta(days=12), "Источник": "МойСклад", "№ Заказа": "МС-1024", "SKU": "Чехол iPhone 15"},
+        {"Дата": today_date - datetime.timedelta(days=18), "Источник": "Wildberries", "№ Заказа": "WB-9100", "SKU": "Коробка Обувная XL"},
+        {"Дата": today_date - datetime.timedelta(days=45), "Источник": "Ozon", "№ Заказа": "OZ-4100", "SKU": "Чехол iPhone 15"},
+    ]
 
-st.sidebar.header("🔑 Подключение каналов API")
-wb_token = st.sidebar.text_input("API Токен WB:", type="password", key="wb")
-ozon_client_id = st.sidebar.text_input("Ozon Client-ID:", key="ozon_id")
-ozon_api_key = st.sidebar.text_input("Ozon API Key:", type="password", key="ozon_key")
-ms_token = st.sidebar.text_input("API Токен МойСклад:", type="password", key="ms")
-
-st.sidebar.markdown("---")
+# --- БОКОВАЯ ПАНЕЛЬ: ТАРИФЫ И ПОЛНОСТЬЮ РУЧНОЙ ВЫБОР ДАТ ---
 st.sidebar.header("⚙️ Тарифы 3PL-Биллинга")
 m3_rate = st.sidebar.number_input("Хранение: 1 м³ / сутки (₽):", min_value=0.0, value=50.0, step=1.0)
 fbs_processing_rate = st.sidebar.number_input("Сборка: 1 заказ FBS (₽):", min_value=0.0, value=35.0, step=1.0)
 
 st.sidebar.markdown("---")
-st.sidebar.header("📅 Фильтр отчетов")
-today = datetime.date.today()
-start_of_month = today.replace(day=1)
-date_range = st.sidebar.date_input("Выберите период:", value=(start_of_month, today), max_value=today)
+st.sidebar.header("📅 Выбор произвольного периода")
 
-st.subheader("📥 Модуль оперативного учета склада")
+# Интерактивный календарь для полностью ручного выбора диапазона (Начало и Конец периода)
+# Пользователь кликает на дату начала, затем на дату окончания периода
+custom_range = st.sidebar.date_input(
+    "Укажите диапазон дат (с и по):", 
+    value=(today_date - datetime.timedelta(days=6), today_date), # По умолчанию открываем за последнюю неделю
+    max_value=today_date,
+    help="Кликните на календарь. Первый клик — дата начала отчета, второй клик — дата окончания отчета."
+)
+
+# Выравниваем и валидируем даты ручного периода
+if isinstance(custom_range, tuple) and len(custom_range) == 2:
+    start_period, end_period = custom_range
+else:
+    start_period = custom_range if isinstance(custom_range, (list, tuple)) else custom_range
+    end_period = start_period
+
+# Считаем точное количество дней в выбранном вами вручную периоде
+days_in_period = (end_period - start_period).days + 1
+
+st.sidebar.markdown("---")
+st.sidebar.success(f"📆 **Период установлен:**\n**С {start_period.strftime('%d.%m.%Y')}\nПо {end_period.strftime('%d.%m.%Y')}**\nКоличество дней для хранения: **{days_in_period}**")
+
+# --- БЛОК 1: ПОАРТИКУЛЬНАЯ ПРИЕМКА ТОВАРА (КОРОБА И ШТУКИ) ---
+st.subheader("📥 Модуль поартикульной приемки груза")
 col_adm1, col_adm2 = st.columns(2)
 
 with col_adm1:
-    st.markdown("**1. Поступление / Приемка товара**")
-    new_accept = st.number_input("Принять товар от селлера на баланс (шт):", min_value=0, value=0, step=10)
-    if st.button("📦 Зафиксировать поступление", use_container_width=True):
-        st.session_state.wms_initial_acceptance += new_accept
-        st.success(f"Товар принят! Баланс на полках увеличен на +{new_accept} шт.")
-        st.rerun()
+    st.markdown("**1. Новое поступление (Приходная накладная)**")
+    existing_skus = list(st.session_state.wms_inventory.keys())
+    selected_sku = st.selectbox("Выберите артикул для приемки:", existing_skus + ["+ Создать новый артикул"])
+    
+    if selected_sku == "+ Создать новый артикул":
+        target_sku = st.text_input("Введите название нового артикула (SKU):", value="Новый Товар SKU-100")
+        c_l = st.number_input("Длина упаковки (см):", min_value=0.1, value=20.0)
+        c_w = st.number_input("Ширина упаковки (см):", min_value=0.1, value=15.0)
+        c_h = st.number_input("Высота упаковки (см):", min_value=0.1, value=10.0)
+    else:
+        target_sku = selected_sku
+        c_l = st.session_state.wms_inventory[selected_sku]['length_cm']
+        c_w = st.session_state.wms_inventory[selected_sku]['width_cm']
+        c_h = st.session_state.wms_inventory[selected_sku]['height_cm']
 
 with col_adm2:
-    st.markdown("**2. Управление лимитом продаж FBS (ВРУЧНУЮ)**")
-    manual_input_fbs = st.number_input("Задать текущий доступный лимит FBS (шт):", min_value=0, value=int(st.session_state.wms_manual_fbs_limit), step=1)
-    if st.button("🔄 Выставить лимит на WB, Ozon, МойСклад", use_container_width=True):
-        st.session_state.wms_manual_fbs_limit = manual_input_fbs
-        st.success(f"Новый лимит в {manual_input_fbs} шт. зафиксирован и подготовлен к отправке по API.")
-        st.rerun()
+    st.markdown("**2. Подсчет количества (Короба × Вложение)**")
+    input_boxes = st.number_input("Количество принятых коробов (шт):", min_value=0, value=0, step=1)
+    input_pcs_in_box = st.number_input("Количество штук внутри короба (вложение):", min_value=1, value=20, step=1)
+    
+    calculated_total_pcs = input_boxes * input_pcs_in_box
+    st.info(f"📐 Будет зачислено на баланс: **{calculated_total_pcs} шт.**")
+    
+    if st.button("📦 Утвердить акт приемки", use_container_width=True):
+        if calculated_total_pcs > 0:
+            if target_sku not in st.session_state.wms_inventory:
+                st.session_state.wms_inventory[target_sku] = {
+                    'length_cm': c_l, 'width_cm': c_w, 'height_cm': c_h,
+                    'boxes': input_boxes, 'pcs_in_box': input_pcs_in_box,
+                    'physical_stock': calculated_total_pcs, 'fbs_limit': 0
+                }
+            else:
+                st.session_state.wms_inventory[target_sku]['boxes'] += input_boxes
+                st.session_state.wms_inventory[target_sku]['physical_stock'] += calculated_total_pcs
+                
+            st.success(f"Артикул '{target_sku}' успешно принят на баланс.")
+            st.rerun()
 
-api_fbo_orders_count = 0
-all_fbs_orders_list = []
-is_live_mode = wb_token and ozon_client_id and ozon_api_key and ms_token
+# --- БЛОК 2: ТАБЛИЦА ТЕКУЩИХ ОСТАТКОВ СКЛАДА ---
+st.markdown("---")
+st.subheader("📊 Текущие остатки товаров на полках фулфилмента")
 
-if is_live_mode:
-    with st.spinner("🤖 Робот проверяет новые заказы через API..."):
-        try:
-            wb_headers = {"Authorization": wb_token, "Content-Type": "application/json"}
-            wb_res = requests.get("https://wildberries.ru", headers=wb_headers, timeout=4)
-            if wb_res.status_code == 200:
-                for o in wb_res.json().get('orders', []):
-                    all_fbs_orders_list.append({"Источник": "Wildberries", "№ Заказа": o.get('id'), "Дата": parser.isoparse(o.get('createdAt')).date(), "SKU": sku_name, "Тариф сборки": fbs_processing_rate})
-            ozon_headers = {"Client-Id": ozon_client_id, "Api-Key": ozon_api_key, "Content-Type": "application/json"}
-            ozon_body = {"dir": "asc", "filter": {"status": "awaiting_packaging"}, "limit": 50, "with": {}}
-            ozon_res = requests.post("https://ozon.ru", headers=ozon_headers, json=ozon_body, timeout=4)
-            if ozon_res.status_code == 200:
-                for p in ozon_res.json().get('result', {}).get('postings', []):
-                    all_fbs_orders_list.append({"Источник": "Ozon", "№ Заказа": p.get('posting_number'), "Дата": parser.isoparse(p.get('in_process_at')).date(), "SKU": sku_name, "Тариф сборки": fbs_processing_rate})
-            ms_headers = {"Authorization": f"Bearer {ms_token}"} if ":" not in ms_token else None
-            auth = tuple(ms_token.split(":")) if ":" in ms_token else None
-            ms_res = requests.get("https://moysklad.ru", headers=ms_headers, auth=auth, timeout=4)
-            if ms_res.status_code == 200:
-                for order in ms_res.json().get('rows', []):
-                    if order.get('state', {}).get('meta', {}).get('name') == "Новый":
-                        all_fbs_orders_list.append({"Источник": "МойСклад", "№ Заказа": order.get('name'), "Дата": parser.isoparse(order.get('moment')).date(), "SKU": sku_name, "Тариф сборки": fbs_processing_rate})
-        except Exception as e:
-            st.sidebar.error(f"Ошибка API: {e}")
+rows_stocks = []
+total_warehouse_m3 = 0.0
+
+for sku, data in st.session_state.wms_inventory.items():
+    phys_stock = data['physical_stock']
+    unit_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
+    total_sku_m3 = unit_m3 * phys_stock
+    total_warehouse_m3 += total_sku_m3
+    
+    rows_stocks.append({
+        "Артикул (SKU)": sku,
+        "Габариты упаковки": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
+        "Принято коробов (шт)": data['boxes'],
+        "Вложение в короб": data['pcs_in_box'],
+        "📦 НА ПОЛКАХ (шт)": phys_stock,
+        "Занято объема (м³)": total_sku_m3
+    })
+
+if rows_stocks:
+    st.dataframe(pd.DataFrame(rows_stocks), use_container_width=True, hide_index=True)
 else:
-    st.warning("🔑 Демо-режим. Пропишите API-ключи слева для работы с реальными личными кабинетами.")
-    for i in range(1, 4):  
-        all_fbs_orders_list.append({"Источник": "Wildberries", "№ Заказа": f"WB-77321{i}", "Дата": today, "SKU": sku_name, "Тариф сборки": fbs_processing_rate})
-    for i in range(1, 3):  
-        all_fbs_orders_list.append({"Источник": "Ozon", "№ Заказа": f"OZ-99432{i}", "Дата": today, "SKU": sku_name, "Тариф сборки": fbs_processing_rate})
-    all_fbs_orders_list.append({"Источник": "МойСклад", "№ Заказа": f"МС-00043", "Дата": today, "SKU": sku_name, "Тариф сборки": fbs_processing_rate})
-    api_fbo_orders_count = 10  
+    st.info("Склад пуст. Проведите первую приемку.")
 
-allocated_to_fbo_total = 20  
-total_fbs_all_channels = len(all_fbs_orders_list)
+# --- БЛОК 3: ЖУРНАЛ ЗАКАЗОВ FBS С ФИЛЬТРАЦИЕЙ ПО ВАШЕМУ РУЧНОМУ ПЕРИОДУ ---
+st.markdown("---")
+st.subheader(f"📋 Операционный журнал заказов FBS за произвольный период")
 
-my_warehouse_physical = st.session_state.wms_initial_acceptance - allocated_to_fbo_total - total_fbs_all_channels
-current_total_balance = st.session_state.wms_initial_acceptance - (api_fbo_orders_count + total_fbs_all_channels)
-live_unified_stock_to_api = max(0, st.session_state.wms_manual_fbs_limit - total_fbs_all_channels)
+df_all_orders = pd.DataFrame(st.session_state.wms_history_orders)
+# Фильтрация строго в рамках ручного диапазона дат [start_period, end_period]
+df_filtered_orders = df_all_orders[(df_all_orders['Дата'] >= start_period) & (df_all_orders['Дата'] <= end_period)]
+orders_count_in_period = len(df_filtered_orders)
 
-df_all_orders = pd.DataFrame(all_fbs_orders_list)
-if isinstance(date_range, tuple) and len(date_range) == 2:
-    start_date, end_date = date_range
-    df_filtered = df_all_orders[(df_all_orders['Дата'] >= start_date) & (df_all_orders['Дата'] <= end_date)]
+# Выгрузка отфильтрованного ручного отчета в Excel
+if not df_filtered_orders.empty:
+    df_excel = df_filtered_orders.copy()
+    df_excel['Дата'] = df_excel['Дата'].apply(lambda x: x.strftime('%Y-%m-%d'))
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df_excel.to_excel(writer, index=False, sheet_name='Отчет FBS ручной')
+    
+    st.download_button(
+        label=f"📥 Скачать отчет в Excel за выбранный период ({start_period.strftime('%d.%m')} - {end_period.strftime('%d.%m')})",
+        data=buffer.getvalue(),
+        file_name=f"fbs_custom_report_{start_period}_to_{end_period}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+    st.dataframe(df_excel, use_container_width=True, hide_index=True)
 else:
-    start_date = date_range if isinstance(date_range, (list, tuple)) else date_range
-    df_filtered = df_all_orders[df_all_orders['Дата'] == start_date]
-    end_date = start_date
+    st.write("🔒 За указанный диапазон дат заказов FBS в системе не обнаружено.")
 
-filtered_orders_count = len(df_filtered)
-
-item_m3 = (l * w * h) / 1000000
-total_m3_active = item_m3 * my_warehouse_physical
-billing_storage = total_m3_active * m3_rate
-billing_processing = filtered_orders_count * fbs_processing_rate
-grand_total = billing_storage + billing_processing
-
+# --- БЛОК 4: ИТОГОВЫЙ СВОДНЫЙ СЧЕТ (3PL-БИЛЛИНГ ЗА ЛЮБОЙ СРОК) ---
 st.markdown("---")
-st.subheader("📊 Мониторинг Мультиканального Единого Стока")
+st.subheader(f"🧾 Сводный 3PL-счет за период: с {start_period.strftime('%d.%m.%Y')} по {end_period.strftime('%d.%m.%Y')}")
 
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    st.metric("📦 НА ВАШИХ ПОЛКАХ (ФИЗ)", f"{my_warehouse_physical} шт")
-with c2:
-    st.metric("🔄 ЕДИНЫЙ СТОК НА ВИТРИНАХ", f"{live_unified_stock_to_api} шт")
-with c3:
-    st.metric("Платный объем хранения (м³)", f"{total_m3_active:.4f} м³")
-with c4:
-    st.metric("Сквозной баланс селлера", f"{current_total_balance} шт")
+# Математический накопительный расчет под произвольное число дней (days_in_period)
+total_storage_cost_period = total_warehouse_m3 * m3_rate * days_in_period
+total_processing_cost_period = orders_count_in_period * fbs_processing_rate
+grand_total_period = total_storage_cost_period + total_processing_cost_period
 
-channels_matrix = [{
-    "Продавец": "ИП Иванов (Мультиканал)", "Артикул (SKU)": sku_name, "Физически у вас": my_warehouse_physical,
-    "Выставлено руками под FBS": st.session_state.wms_manual_fbs_limit, "Текущий Сток на WB (API)": live_unified_stock_to_api,
-    "Текущий Сток на Ozon (API)": live_unified_stock_to_api, "Текущий Сток в МойСклад (API)": live_unified_stock_to_api, "Уехало на FBO (WB + Ozon)": allocated_to_fbo_total
-}]
-st.dataframe(pd.DataFrame(channels_matrix), use_container_width=True, hide_index=True)
-
-st.markdown("---")
-st.subheader(f"📋 Консолидированный журнал заказов (Период: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')})")
-
-df_excel = df_filtered.copy()
-df_excel['Дата'] = df_excel['Дата'].apply(lambda x: x.strftime('%Y-%m-%d'))
-buffer = io.BytesIO()
-with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-    df_excel.to_excel(writer, index=False, sheet_name='Мультиканал FBS')
-
-st.download_button(
-    label="📥 Скачать сводный мультиканальный отчет в Excel",
-    data=buffer.getvalue(),
-    file_name=f"multichannel_report_{start_date}_to_{end_date}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True
-)
-
-st.dataframe(df_excel, use_container_width=True, hide_index=True)
-
-st.markdown("---")
-st.subheader("🧾 Сводный отчет по начислениям (Мультиканальный биллинг)")
-
-billing_data = [
-    {"Услуга фулфилмента": "Ответственное хранение (Платные кубометры на ваших полках)", "База расчета": f"{my_warehouse_physical} шт / {total_m3_active:.4f} м³", "Тарифная ставка": f"{m3_rate:.2f} ₽ за 1 м³ / сутки", "Итого (₽)": f"{billing_storage:.2f} ₽"},
-    {"Услуга фулфилмента": f"Сборка и упаковка мультиканальных заказов FBS (За выбранный период)", "База расчета": f"{filtered_orders_count} шт зафиксировано (WB + Ozon + МойСклад)", "Тарифная ставка": f"{fbs_processing_rate:.2f} ₽ за 1 заказ", "Итого (₽)": f"{billing_processing:.2f} ₽"}
+billing_period_data = [
+    {
+        "Услуга фулфилмента": "Ответственное хранение объема груза на полках (Накопительное за выбранный срок)",
+        "База расчета": f"{total_warehouse_m3:.4f} м³ × {days_in_period} дн.",
+        "Тарифная ставка": f"{m3_rate:.2f} ₽ за 1 м³ / сутки",
+        "Итого к списанию за период": f"{total_storage_cost_period:.2f} ₽"
+    },
+    {
+        "Услуга фулфилмента": "Сборка, упаковка и маркировка мультиканальных заказов FBS",
+        "База расчета": f"{orders_count_in_period} шт. обработано за выбранный срок",
+        "Тарифная ставка": f"{fbs_processing_rate:.2f} ₽ за 1 заказ",
+        "Итого к списанию за период": f"{total_processing_cost_period:.2f} ₽"
+    }
 ]
-st.table(pd.DataFrame(billing_data))
-st.info(f"💰 **ОБЩАЯ СУММА К СУТОЧНОМУ СПИСАНИЮ С БАЛАНСА КЛИЕНТА:** **{grand_total:.2f} ₽**")
+
+st.table(pd.DataFrame(billing_period_data))
+
+# Финальный финансовый вердикт под кастомные даты
+st.success(f"💰 **ИТОГО К СПИСАНИЮ С БАЛАНСА СЕЛЛЕРА ЗА ВЫБРАННЫЙ ПЕРИОД ({days_in_period} дн.):** **{grand_total_period:.2f} ₽**")
