@@ -5,27 +5,21 @@ import requests
 import io
 
 # Настройка страницы WMS
-st.set_page_config(page_title="WMS Фикс Биллинга и Хронологии", layout="wide", page_icon="📦")
+st.set_page_config(page_title="WMS Чистый Тест OMS", layout="wide", page_icon="📦")
 
 st.title("WMS")
 st.write(f"Последняя синхронизация баз данных: `{datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}`")
 
-# --- ИНИЦИАЛИЗАЦИЯ ДИНАМИЧЕСКИХ БАЗ ДАННЫХ (ФУНДАМЕНТ OMS) ---
+# --- ПОЛНОЕ ОБНУЛЕНИЕ ВСЕХ БАЗ ДАННЫХ ДЛЯ ЧИСТОГО ТЕСТА ---
+# Справочник физических товаров на вашем складе (ФФ) — СБРОШЕН В 0
 if 'wms_ff_inventory' not in st.session_state:
-    st.session_state.wms_ff_inventory = {
-        'ФФ-СУШИЛКА-01': {
-            'name': 'Сушилка для обуви электрическая XL',
-            'length_cm': 25.0, 'width_cm': 15.0, 'height_cm': 10.0,
-            'boxes': 5, 'pcs_in_box': 20, 'physical_stock': 100, 'fbo_allocated': 20
-        }
-    }
+    st.session_state.wms_ff_inventory = {}
 
+# Справочник активных связок (Маппинг) — СБРОШЕН В 0
 if 'wms_mapping_rules' not in st.session_state:
-    st.session_state.wms_mapping_rules = [
-        {"Внутренний артикул ФФ": "ФФ-СУШИЛКА-01", "Магазин": "Wildberries (Кабинет 1)", "Артикул продавца": "001", "Баркод": "4607123456011"},
-        {"Внутренний артикул ФФ": "ФФ-СУШИЛКА-01", "Магазин": "Ozon (Кабинет 1)", "Артикул продавца": "сушилка1", "Баркод": "4607123456022"},
-    ]
+    st.session_state.wms_mapping_rules = []
 
+# Внешние карточки, полученные по API с маркетплейсов для привязки (4 магазина вашего клиента)
 if 'api_pulled_cards' not in st.session_state:
     st.session_state.api_pulled_cards = [
         {"Магазин": "Wildberries (Кабинет 1)", "Артикул продавца": "001", "Название на витрине": "Сушилка обувная электрическая", "Баркод": "4607123456011", "Ручной остаток FBS на МП": 15},
@@ -35,21 +29,10 @@ if 'api_pulled_cards' not in st.session_state:
     ]
 
 today_date = datetime.date.today()
-now_time = datetime.datetime.now()
 
+# Пооперационный журнал приходов — СБРОШЕН В 0
 if 'wms_receipt_history' not in st.session_state:
-    st.session_state.wms_receipt_history = [
-        {
-            "Дата операции": today_date, "Время приемки": "22:45:10",
-            "Внутренний Артикул ФФ": "ФФ-СУШИЛКА-01", "Разгружено коробов (шт)": 3, "Принято товара (шт)": 60,
-            "Сумма за разгрузку": 60.0, "Сумма за обработку": 300.0, "Итого за накладную": 360.0
-        },
-        {
-            "Дата операции": today_date - datetime.timedelta(days=1), "Время приемки": "11:15:30",
-            "Внутренний Артикул ФФ": "ФФ-СУШИЛКА-01", "Разгружено коробов (шт)": 2, "Принято товара (шт)": 40,
-            "Сумма за разгрузку": 40.0, "Сумма за обработку": 200.0, "Итого за накладную": 240.0
-        }
-    ]
+    st.session_state.wms_receipt_history = []
 
 if 'm3_rate' not in st.session_state: st.session_state.m3_rate = 50.0
 if 'fbs_processing_rate' not in st.session_state: st.session_state.fbs_processing_rate = 35.0
@@ -76,8 +59,8 @@ with tab_receive:
     with col_step1:
         select_ff = st.selectbox("Выберите внутренний артикул ФФ:", existing_ff_skus + ["+ Создать новый ФФ-Артикул"])
         if select_ff == "+ Создать новый ФФ-Артикул":
-            target_ff_sku = st.text_input("Присвойте новый код ФФ:", value="ФФ-ТОВАР-02")
-            ff_name = st.text_input("Введите название товара для склада:", value="Сушилка для обуви с УФ-лампой")
+            target_ff_sku = st.text_input("Присвойте новый код ФФ:", value="ФФ-ТОВАР-01")
+            ff_name = st.text_input("Введите название товара для склада:", value="Тестовый товар")
             c_l = st.number_input("Длина упаковки (см):", min_value=0.1, value=20.0)
             c_w = st.number_input("Ширина упаковки (см):", min_value=0.1, value=15.0)
             c_h = st.number_input("Высота упаковки (см):", min_value=0.1, value=10.0)
@@ -154,13 +137,13 @@ with tab_receive:
                 })
                 st.success("Акт успешно записан!")
                 st.rerun()
-# ВКЛАДКА 2: МАТРИЦА ЕДИНОГО СТОКА (ИСПРАВЛЕНО НАЗВАНИЕ КОЛОНКИ ДЛЯ ИСКЛЮЧЕНИЯ KEYERROR)
+# ВКЛАДКА 2: МАТРИЦА ЕДИНОГО СТОКА (РАСЧЕТ ОБЪЕМА НА БАЗЕ ХРАНЕНИЯ ФИЗ + FBS)
 with tab_stocks:
     st.subheader("📊 Оперативная мультиканальная матрица Единого Стока")
     
     rows_unified = []
     total_warehouse_m3 = 0.0
-    simulated_fbs_orders = 5  
+    simulated_fbs_orders = 0  # Сбрасываем симуляции в 0 для чистого теста
     
     for ff_sku, data in st.session_state.wms_ff_inventory.items():
         total_live_fbs_on_marketplaces = 0
@@ -174,10 +157,9 @@ with tab_stocks:
                         total_live_fbs_on_marketplaces += mp_stock
                         connected_channels_list.append(f"{rule['Магазин']} (SKU: {rule['Артикул продавца']} | Сток: {mp_stock} шт.)")
         
-        # Чистый физический остаток на полках склада
         phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders)
         
-        # Полная сумма штук, занимающих место на ваших полках (включая FBS лимиты)
+        # Правильная формула: Складываем физические полки склада и остатки по FBS
         total_billable_pcs_including_fbs = phys_stock_on_shelves + total_live_fbs_on_marketplaces
         
         unit_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
@@ -186,7 +168,6 @@ with tab_stocks:
         
         channels_str = ", \n".join(connected_channels_list) if connected_channels_list else "⚠️ Нет привязанных витрин"
         
-        # НАЗВАНИЕ КОЛОНКИ ИДЕАЛЬНО ВЫРАВНЕНО С ВЫВОДОМ НА ЭКРАН (УСТРАНЕНИЕ СБОЯ СТРОКИ 203)
         rows_unified.append({
             "Внутренний Код ФФ": ff_sku, 
             "Описание товара": data['name'], 
@@ -201,20 +182,19 @@ with tab_stocks:
         df_unified_matrix = pd.DataFrame(rows_unified)
         k1, k2, k3 = st.columns(3)
         with k1: st.metric("Всего позиций ФФ", len(df_unified_matrix))
-        with k2: st.metric("Всего штук на платном хранении фулфилмента (Физ + FBS)", int(df_unified_matrix["📦 НА ПОЛКАХ (Платное хранение, шт)"].sum()))
+        with k2: st.metric("Всего штук на платном хранении (Физ + FBS)", int(df_unified_matrix["📦 НА ПОЛКАХ (Платное хранение, шт)"].sum()))
         with k3: st.metric("Активный тарифицируемый объем (м³)", f"{total_warehouse_m3:.4f} м³")
         st.write("---")
         
-        # ИСПРАВЛЕНО: Теперь названия колонок внутри квадратных скобок на 100% совпадают с rows_unified
         st.dataframe(
             df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "Габариты упаковки (ЗАМЕР СКЛАДА)", "📦 НА ПОЛКАХ (Платное хранение, шт)", "Из них выставлено под FBS менеджером (шт)", "Уехало на FBO маркетплейсов", "Детализация связанных витрин селлера"]], 
             use_container_width=True, 
             hide_index=True
         )
     else: 
-        st.info("Склад пуст. Проведите приемку в первой вкладке.")
+        st.info("👋 Склад полностью пуст. Перейдите на первую вкладку, чтобы создать ваш первый внутренний ФФ-артикул, обмерить его габариты и выполнить приемку коробок.")
 
-# ВКЛАДКА 3: СЧЕТА И СКВОЗНОЙ ПООПЕРАЦИОННЫЙ БИЛЛИНГ С УЧЕТОМ ЖУРНАЛА ПРИХОДОВ ЗА ПЕРИОД
+# ВКЛАДКА 3: СЧЕТА И СКВОЗНОЙ ПООПЕРАЦИОННЫЙ БИЛЛИНГ
 with tab_billing:
     st.subheader("📅 Финансовая отчетность по периодам (Календарь)")
     col_b1, col_b2 = st.columns(2)
@@ -243,31 +223,43 @@ with tab_billing:
             total_receipt_billing_period = df_receipt_filtered['Итого за накладную'].sum()
             
             st.write("---")
-            st.subheader("📋 Операционный журнал приходов (Поминутная хронология за выбранный период)")
+            st.subheader("📋 Операционный журнал приходов (Поминутная хронология)")
             df_receipt_disp = df_receipt_filtered.copy()
             df_receipt_disp['Дата операции'] = df_receipt_disp['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
             st.dataframe(df_receipt_disp, use_container_width=True, hide_index=True)
 
     st.write("---")
-    st.subheader("🧾 Итоговый детализированный 3PL-счет за выбранный срок (Все операции + Хранение)")
+    st.subheader("🧾 Итоговый детализированный 3PL-счет за выбранный срок")
     
     total_storage_cost_period = total_warehouse_m3 * st.session_state.m3_rate * days_in_period
-    total_processing_cost_period = 5 * st.session_state.fbs_processing_rate
-    grand_total_period = total_storage_cost_period + total_processing_cost_period + total_receipt_billing_period
+    grand_total_period = total_storage_cost_period + total_receipt_billing_period
 
     billing_period_data = [
         {"Услуга фулфилмента": "Ответственное хранение объема груза на полках (Включая остатки FBS)", "База расчета": f"{total_warehouse_m3:.4f} м³ × {days_in_period} дн.", "Тарифная ставка": f"{st.session_state.m3_rate:.2f} ₽ за 1 м³ / сутки", "Итого к списанию (₽)": f"{total_storage_cost_period:.2f} ₽"},
-        {"Услуга фулфилмента": "Сборка, упаковка и маркировка заказов по FBS", "База расчета": "5 шт. обработано", "Тарифная ставка": f"{st.session_state.fbs_processing_rate:.2f} ₽ за 1 заказ", "Итого к списанию (₽)": f"{5 * st.session_state.fbs_processing_rate:.2f} ₽"},
         {"Услуга фулфилмента": "Разгрузка прибывших коробов с машиной (Акты из журнала приходов)", "База расчета": f"{total_boxes_unloaded_period} кор. зафиксировано", "Тарифная ставка": f"{st.session_state.box_unload_rate:.2f} ₽ за 1 короб", "Итого к списанию (₽)": f"{total_boxes_unloaded_period * st.session_state.box_unload_rate:.2f} ₽"},
         {"Услуга фулфилмента": "Поштучная обработка, пересчет и стикерование товара (Акты из журнала приходов)", "База расчета": f"{total_pcs_received_period} шт. зафиксировано", "Тарифная ставка": f"{st.session_state.piece_receive_rate:.2f} ₽ за 1 штуку", "Итого к списанию (₽)": f"{total_pcs_received_period * st.session_state.piece_receive_rate:.2f} ₽"}
     ]
     st.table(pd.DataFrame(billing_period_data))
-    st.success(f"💰 **ОБЩИЙ СКВОЗНОЙ СЧЕТ К СУММАРНОМУ СПИСАНИЮ С БАЛАНСА СЕЛЛЕРА ЗА ПЕРИОД:** **{grand_total_period:.2f} ₽** (Все услуги прихода и FBS хранения учтены полностью)")
+    st.success(f"💰 **ОБЩИЙ СКВОЗНОЙ СЧЕТ К СУММАРНОМУ СПИСАНИЮ С БАЛАНСА СЕЛЛЕРА ЗА ПЕРИОД:** **{grand_total_period:.2f} ₽**")
 
 # ВКЛАДКА 4: НАСТРОЙКИ
 with tab_api:
     st.subheader("🔑 Панель интеграции и тарифов 3PL")
-    st.session_state.m3_rate = st.number_input("Стоимость хранения 1 м³ груза в сутки (₽):", min_value=0.0, value=float(st.session_state.m3_rate), step=1.0)
-    st.session_state.fbs_processing_rate = st.number_input("Стоимость сборки одного заказа FBS (₽):", min_value=0.0, value=float(st.session_state.fbs_processing_rate), step=1.0)
-    st.session_state.piece_receive_rate = st.number_input("Тариф за поштучную обработку 1 единицы товара (₽):", min_value=0.0, value=float(st.session_state.piece_receive_rate), step=0.5)
-    st.session_state.box_unload_rate = st.number_input("Тариф за физическую разгрузку 1 короба с машины (₽):", min_value=0.0, value=float(st.session_state.box_unload_rate), step=1.0)
+    col_t1, col_t2 = st.columns(2)
+    with col_t1:
+        st.markdown("**Настройка базовых тарифов фулфилмента**")
+        st.session_state.m3_rate = st.number_input("Стоимость хранения 1 м³ груза в сутки (₽):", min_value=0.0, value=float(st.session_state.m3_rate), step=1.0)
+        st.session_state.fbs_processing_rate = st.number_input("Стоимость сборки одного заказа FBS (₽):", min_value=0.0, value=float(st.session_state.fbs_processing_rate), step=1.0)
+        st.session_state.piece_receive_rate = st.number_input("Тариф за поштучную обработку 1 единицы товара (₽):", min_value=0.0, value=float(st.session_state.piece_receive_rate), step=0.5)
+        st.session_state.box_unload_rate = st.number_input("Тариф за физическую разгрузку 1 короба с машины (₽):", min_value=0.0, value=float(st.session_state.box_unload_rate), step=1.0)
+    with col_t2:
+        st.markdown("**Авторизация личных кабинетов маркетплейсов**")
+        input_wb = st.text_input("Введите API Токен WB (тип 'Контент'):", type="password", value=st.session_state.wb_token_saved)
+        input_oz_id = st.text_input("Введите Ozon Client-ID:", value=st.session_state.ozon_id_saved)
+        input_oz_key = st.text_input("Введите Ozon API Key:", type="password", value=st.session_state.ozon_key_saved)
+        if st.button("💾 Сохранить и подключить ключи интеграции API", use_container_width=True):
+            st.session_state.wb_token_saved = input_wb
+            st.session_state.ozon_id_saved = input_oz_id
+            st.session_state.ozon_key_saved = input_oz_key
+            st.success("Ключи сохранены в сессию!")
+            st.rerun()
