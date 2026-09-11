@@ -5,13 +5,12 @@ import requests
 import io
 
 # Настройка страницы WMS
-st.set_page_config(page_title="WMS Ручные Габариты OMS", layout="wide", page_icon="🌐")
+st.set_page_config(page_title="WMS Хронология OMS", layout="wide", page_icon="🌐")
 
-st.title("🌐 Мультиканальная WMS: Фиксация реальных габаритов и Единый Сток OMS")
+st.title("WMS")
 st.write(f"Последняя синхронизация баз данных: `{datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}`")
 
 # --- ИНИЦИАЛИЗАЦИЯ ДИНАМИЧЕСКИХ БАЗ ДАННЫХ (ФУНДАМЕНТ OMS) ---
-# База 1: Справочник физических товаров на вашем складе с реальными размерами, заданными вручную
 if 'wms_ff_inventory' not in st.session_state:
     st.session_state.wms_ff_inventory = {
         'ФФ-СУШИЛКА-01': {
@@ -21,14 +20,12 @@ if 'wms_ff_inventory' not in st.session_state:
         }
     }
 
-# База 2: Справочник связок внешних кабинетов под ваш ФФ-код
 if 'wms_mapping_rules' not in st.session_state:
     st.session_state.wms_mapping_rules = [
         {"Внутренний артикул ФФ": "ФФ-СУШИЛКА-01", "Магазин": "Wildberries (Кабинет 1)", "Артикул продавца": "001", "Баркод": "4607123456011"},
         {"Внутренний артикул ФФ": "ФФ-СУШИЛКА-01", "Магазин": "Ozon (Кабинет 1)", "Артикул продавца": "сушилка1", "Баркод": "4607123456022"},
     ]
 
-# База 3: Внешние карточки, полученные по API с маркетплейсов (без габаритов, только для связывания)
 if 'api_pulled_cards' not in st.session_state:
     st.session_state.api_pulled_cards = [
         {"Магазин": "Wildberries (Кабинет 1)", "Артикул продавца": "001", "Название на витрине": "Сушилка обувная электрическая", "Баркод": "4607123456011", "Ручной остаток FBS на МП": 15},
@@ -37,24 +34,50 @@ if 'api_pulled_cards' not in st.session_state:
         {"Магазин": "Ozon (Кабинет 2)", "Артикул продавца": "OZ-DRY-CLEAN", "Название на витрине": "Сушилка + дезинфектор", "Баркод": "4607123456044", "Ручной остаток FBS на МП": 5},
     ]
 
-if 'wms_receipt_history' not in st.session_state: st.session_state.wms_receipt_history = []  
+# Инициализация истории приходов с ДАТАМИ И ВРЕМЕНЕМ (включая демонстрационные логи)
+today_date = datetime.date.today()
+now_time = datetime.datetime.now()
+
+if 'wms_receipt_history' not in st.session_state:
+    st.session_state.wms_receipt_history = [
+        {
+            "Дата операции": today_date,
+            "Время приемки": (now_time - datetime.timedelta(hours=2)).strftime('%H:%M:%S'),
+            "Внутренний Артикул ФФ": "ФФ-СУШИЛКА-01",
+            "Разгружено коробов (шт)": 3,
+            "Принято товара (шт)": 60,
+            "Сумма за разгрузку": 60.0,
+            "Сумма за обработку": 300.0,
+            "Итого за накладную": 360.0
+        },
+        {
+            "Дата операции": today_date - datetime.timedelta(days=1),
+            "Время приемки": "11:15:30",
+            "Внутренний Артикул ФФ": "ФФ-СУШИЛКА-01",
+            "Разгружено коробов (шт)": 2,
+            "Принято товара (шт)": 40,
+            "Сумма за разгрузку": 40.0,
+            "Сумма за обработку": 200.0,
+            "Итого за накладную": 240.0
+        }
+    ]
+
 if 'm3_rate' not in st.session_state: st.session_state.m3_rate = 50.0
 if 'fbs_processing_rate' not in st.session_state: st.session_state.fbs_processing_rate = 35.0
 if 'piece_receive_rate' not in st.session_state: st.session_state.piece_receive_rate = 5.0     
 if 'box_unload_rate' not in st.session_state: st.session_state.box_unload_rate = 20.0       
 
-today_date = datetime.date.today()
 if 'start_period' not in st.session_state: st.session_state.start_period = today_date - datetime.timedelta(days=6)
 if 'end_period' not in st.session_state: st.session_state.end_period = today_date
-# --- СОЗДАНИЕ СТРУКТУРЫ ВКЛАДОК ---
+# --- СОЗДАНИЕ СТРУКТУРЫ ИЗ 5 РАЗДЕЛЬНЫХ ВКЛАДОК ---
 tab_receive, tab_mapping, tab_stocks, tab_billing, tab_api = st.tabs([
-    "📥 Поартикульная Приемка", "🔗 Конструктор Связок (Маппинг)", "📊 Единый Сток (Матрица)", "📅 Счета и 3PL-Биллинг", "🔑 Настройки API и Тарифы"
+    "📥 Поартикульная Приемка", "🔗 Конструктор Связок (Маппинг)", "📊 Единый Сток (Матрица)", "📅 Счета и 3PL-Биллинг", "🔑 Подключение API и Тарифы"
 ])
 
-# ВКЛАДКА 1: ПРИЕМКА ТОВАРА С ОБЯЗАТЕЛЬНЫМ РУЧНЫМ ОПРЕДЕЛЕНИЕМ РАЗМЕРОВ У ПАКОВКИ
+# ВКЛАДКА 1: ПРИЕМКА ТОВАРА С АВТОФИКСАЦИЕЙ ДАТЫ И ТОЧНОГО ВРЕМЕНИ
 with tab_receive:
     st.subheader("📥 Поартикульный приход груза и фиксация фактических габаритов")
-    st.info("📏 **Контроль кубатуры:** Введите реальные размеры единицы товара по результатам замера на складе. Эти данные защищают вашу прибыль от заниженных габаритов в ЛК селлера.")
+    st.info("📏 **Контроль кубатуры**")
     
     existing_ff_skus = list(st.session_state.wms_ff_inventory.keys())
     col_r1, col_rec2 = st.columns(2)
@@ -63,7 +86,6 @@ with tab_receive:
         st.markdown("**1. Данные товара и фактический замер габаритов (1 шт)**")
         select_ff = st.selectbox("Внутренний код товара (ФФ):", existing_ff_skus + ["+ Создать новый ФФ-Артикул"])
         
-        # Поля ввода размеров всегда открыты для ручной фиксации или проверки при каждом приходе
         if select_ff == "+ Создать новый ФФ-Артикул":
             target_ff_sku = st.text_input("Задайте новый ФФ-код:", value="ФФ-ТОВАР-02")
             ff_name = st.text_input("Описание товара для склада:", value="Сушилка для обуви с УФ-лампой")
@@ -73,7 +95,6 @@ with tab_receive:
         else:
             target_ff_sku = select_ff
             ff_name = st.text_input("Описание товара для склада:", value=st.session_state.wms_ff_inventory[select_ff]['name'])
-            # Позволяем перемерить и обновить размеры даже у старого товара, если селлер изменил упаковку
             c_l = st.number_input("Реальная Длина упаковки (см):", min_value=0.1, value=float(st.session_state.wms_ff_inventory[select_ff]['length_cm']), key="len_old")
             c_w = st.number_input("Реальная Ширина упаковки (см):", min_value=0.1, value=float(st.session_state.wms_ff_inventory[select_ff]['width_cm']), key="wid_old")
             c_h = st.number_input("Реальная Высота упаковки (см):", min_value=0.1, value=float(st.session_state.wms_ff_inventory[select_ff]['height_cm']), key="hei_old")
@@ -88,17 +109,17 @@ with tab_receive:
         cost_check = calculated_total_pcs * st.session_state.piece_receive_rate
         total_receipt_cost = cost_unload + cost_check
         
-        # Рассчитываем объем одной единицы и всей партии по введенным размерам для наглядности
         unit_m3_calc = (c_l * c_w * c_h) / 1000000
         total_m3_calc = unit_m3_calc * calculated_total_pcs
         
         st.markdown(f"### 📐 Итого к зачислению: **{calculated_total_pcs} шт.**")
-        st.info(f"📊 Объем новой партии по обмерам склада: **{total_m3_calc:.4f} м³** (1 шт = {unit_m3_calc:.5f} м³)")
+        st.info(f"📊 Объем новой партии по обмерам склада: **{total_m3_calc:.4f} м³**")
         st.warning(f"💰 Логистика прихода: Разгрузка {cost_unload:.2f} ₽ + Обработка {cost_check:.2f} ₽ = **{total_receipt_cost:.2f} ₽**")
         
-        if st.button("📦 Утвердить акт приемки и сохранить габариты", use_container_width=True):
+        if st.button("📦 Утвердить акт приемки и зафиксировать время", use_container_width=True):
             if calculated_total_pcs > 0:
-                # Фиксируем или перезаписываем данные в карточку товара
+                current_time_stamp = datetime.datetime.now()
+                
                 st.session_state.wms_ff_inventory[target_ff_sku] = {
                     'name': ff_name, 'length_cm': c_l, 'width_cm': c_w, 'height_cm': c_h,
                     'boxes': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('boxes', 0) + input_boxes,
@@ -107,14 +128,21 @@ with tab_receive:
                     'fbo_allocated': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('fbo_allocated', 0)
                 }
                 
+                # АВТОМАТИЧЕСКИЕ ДАТА И ВРЕМЯ ХРОНОЛОГИИ ПРИЕМКИ
                 st.session_state.wms_receipt_history.append({
-                    "Дата операции": today_date, "Артикул": target_ff_sku, "Разгружено коробов": input_boxes, "Принято штук": calculated_total_pcs,
-                    "Сумма за разгрузку": cost_unload, "Сумма за обработку": cost_check, "Итого за накладную": total_receipt_cost
+                    "Дата операции": current_time_stamp.date(),
+                    "Время приемки": current_time_stamp.strftime('%H:%M:%S'),
+                    "Внутренний Артикул ФФ": target_ff_sku,
+                    "Разгружено коробов (шт)": input_boxes,
+                    "Принято товара (шт)": calculated_total_pcs,
+                    "Сумма за разгрузку": cost_unload,
+                    "Сумма за обработку": cost_check,
+                    "Итого за накладную": total_receipt_cost
                 })
-                st.success(f"Товар успешно оприходован по реальным габаритам {c_l}x{c_w}x{c_h} см.")
+                st.success(f"Накладная проведена в {current_time_stamp.strftime('%H:%M:%S')}!")
                 st.rerun()
 
-# ВКЛАДКА 2: КОНСТРУКТОР СВЯЗОК
+# ВКЛАДКА 2: КОНСТРУКТОР СВЯЗОК (МАППИНГ)
 with tab_mapping:
     st.subheader("🔗 Конструктор связок: Объединение внешних артикулов маркетплейсов под ваш ФФ-код")
     col_map1, col_map2 = st.columns(2)
@@ -136,7 +164,7 @@ with tab_mapping:
     st.write("---")
     st.markdown("**📂 Действующие правила маппинга (Справочник связок)**")
     st.table(pd.DataFrame(st.session_state.wms_mapping_rules))
-# ВКЛАДКА 3: МАТРИЦА ЕДИНОГО СТОКА OMS (ВЫВОД НАБЛЮДЕНИЯ ЗА РУЧНЫМИ FBS С МП)
+# ВКЛАДКА 3: МАТРИЦА ЕДИНОГО СТОКА OMS (ТОЛЬКО ОТОБРАЖЕНИЕ РУЧНЫХ FBS ИЗ API)
 with tab_stocks:
     st.subheader("📊 Оперативная мультиканальная матрица Единого Стока")
     
@@ -146,7 +174,6 @@ with tab_stocks:
     
     for ff_sku, data in st.session_state.wms_ff_inventory.items():
         phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders)
-        
         total_live_fbs_on_marketplaces = 0
         connected_channels_list = []
         
@@ -159,8 +186,6 @@ with tab_stocks:
                         connected_channels_list.append(f"{rule['Магазин']} (SKU: {rule['Артикул продавца']} | В наличии на МП: {mp_stock} шт.)")
         
         channels_str = ", \n".join(connected_channels_list) if connected_channels_list else "⚠️ Нет привязанных витрин"
-        
-        # Расчет кубатуры на базе РЕАЛЬНЫХ размеров, зафиксированных вручную при приемке
         unit_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
         total_sku_m3 = unit_m3 * phys_stock_on_shelves
         total_warehouse_m3 += total_sku_m3
@@ -178,7 +203,7 @@ with tab_stocks:
     st.write("---")
     st.dataframe(df_unified_matrix, use_container_width=True, hide_index=True)
 
-# ВКЛАДКА 4: СЧЕТА И ПООПЕРАЦИОННЫЙ БИЛЛИНГ
+# ВКЛАДКА 4: СЧЕТА И ПООПЕРАЦИОННЫЙ БИЛЛИНГ С ПОМИНУТНЫМ ЖУРНАЛОМ ПРИХОДОВ И EXCEL
 with tab_billing:
     st.subheader("📅 Финансовая отчетность по периодам (Календарь)")
     col_b1, col_b2 = st.columns(2)
@@ -187,40 +212,52 @@ with tab_billing:
         if isinstance(custom_range, tuple) and len(custom_range) == 2: st.session_state.start_period, st.session_state.end_period = custom_range
         days_in_period = (st.session_state.end_period - st.session_state.start_period).days + 1
         st.success(f"Период расчета: **{days_in_period} дн.**")
-    with col_b2:
-        st.write("##")
-        df_excel_ready = df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "📦 НА ВАШИХ ПОЛКАХ (ФИЗ, шт)", "Габариты упаковки (ЗАМЕР СКЛАДА)"]].copy()
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_excel_ready.to_excel(writer, index=False)
-        st.download_button(label="📥 Скачать сводный отчет в Excel", data=buffer.getvalue(), file_name="wms_3pl_billing.xlsx", use_container_width=True)
 
-    df_receipt_history = pd.DataFrame(st.session_state.wms_receipt_history) if st.session_state.wms_receipt_history else pd.DataFrame(columns=["Дата операции", "Разгружено коробов", "Принято штук", "Сумма за разгрузку", "Сумма за обработку", "Итого за накладную"])
+    df_receipt_history = pd.DataFrame(st.session_state.wms_receipt_history) if st.session_state.wms_receipt_history else pd.DataFrame(columns=["Дата операции", "Время приемки", "Внутренний Артикул ФФ", "Разгружено коробов (шт)", "Принято товара (шт)", "Сумма за разгрузку", "Сумма за обработку", "Итого за накладную"])
+    
     total_boxes_unloaded_period = 0
     total_pcs_received_period = 0
     total_receipt_billing_period = 0.0
     
+    df_receipt_filtered = pd.DataFrame()
     if not df_receipt_history.empty:
         df_receipt_filtered = df_receipt_history[(df_receipt_history['Дата операции'] >= st.session_state.start_period) & (df_receipt_history['Дата операции'] <= st.session_state.end_period)]
-        total_boxes_unloaded_period = df_receipt_filtered['Разгружено коробов'].sum()
-        total_pcs_received_period = df_receipt_filtered['Принято штук'].sum()
+        total_boxes_unloaded_period = df_receipt_filtered['Разгружено коробов (шт)'].sum()
+        total_pcs_received_period = df_receipt_filtered['Принято товара (шт)'].sum()
         total_receipt_billing_period = df_receipt_filtered['Итого за накладную'].sum()
+
+    with col_b2:
+        st.write("##")
+        # ГЕНЕРАЦИЯ EXCEL: Объединяем остатки и пооперационный поминутный журнал приходов в один файл
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "📦 НА ВАШИХ ПОЛКАХ (ФИЗ, шт)", "Габариты упаковки (ЗАМЕР СКЛАДА)"]].to_excel(writer, index=False, sheet_name='Текущие остатки')
+            if not df_receipt_filtered.empty:
+                df_excel_receipt = df_receipt_filtered.copy()
+                df_excel_receipt['Дата операции'] = df_excel_receipt['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
+                df_excel_receipt.to_excel(writer, index=False, sheet_name='Журнал приходов по времени')
+        st.download_button(label="📥 Скачать сводный отчет WMS в Excel", data=buffer.getvalue(), file_name=f"wms_report_{st.session_state.start_period}_to_{st.session_state.end_period}.xlsx", use_container_width=True)
+
+    if not df_receipt_filtered.empty:
         st.write("---")
-        st.subheader("📋 Операционный журнал приходов (Логистика за период)")
+        st.subheader("📋 Операционный журнал приходов (Хронология приемки за период)")
         df_receipt_disp = df_receipt_filtered.copy()
         df_receipt_disp['Дата операции'] = df_receipt_disp['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
-        st.dataframe(df_receipt_disp, use_container_width=True, hide_index=True)
+        # Выводим на экран хронологическую таблицу с точным временем приемки
+        st.dataframe(df_receipt_disp[["Дата операции", "Время приемки", "Внутренний Артикул ФФ", "Разгружено коробов (шт)", "Принято товара (шт)", "Сумма за разгрузку", "Сумма за обработку", "Итого за накладную"]], use_container_width=True, hide_index=True)
 
     st.write("---")
     st.subheader("🧾 Итоговый детализированный 3PL-счет за выбранный срок")
     total_storage_cost_period = total_warehouse_m3 * st.session_state.m3_rate * days_in_period
+    simulated_fbs_orders = 5
     total_processing_cost_period = simulated_fbs_orders * st.session_state.fbs_processing_rate
     grand_total_period = total_storage_cost_period + total_processing_cost_period + total_receipt_billing_period
 
     billing_period_data = [
         {"Услуга фулфилмента": "Ответственное хранение объема груза на полках", "База расчета": f"{total_warehouse_m3:.4f} м³ × {days_in_period} дн.", "Тарифная ставка": f"{st.session_state.m3_rate:.2f} ₽ за 1 м³ / сутки", "Итого к списанию (₽)": f"{total_storage_cost_period:.2f} ₽"},
         {"Услуга фулфилмента": "Сборка, упаковка и маркировка заказов по FBS", "База расчета": f"{simulated_fbs_orders} шт. обработано", "Тарифная ставка": f"{st.session_state.fbs_processing_rate:.2f} ₽ за 1 заказ", "Итого к списанию (₽)": f"{total_processing_cost_period:.2f} ₽"},
-        {"Услуга фулфилмента": "Разгрузка прибывших коробов с машиной", "База расчета": f"{total_boxes_unloaded_period} кор. разгружено", "Тарифная ставка": f"{st.session_state.box_unload_rate:.2f} ₽ за 1 короб", "Итого к списанию (₽)": f"{df_receipt_history[(df_receipt_history['Дата операции'] >= st.session_state.start_period) & (df_receipt_history['Дата операции'] <= st.session_state.end_period)]['Сумма за разгрузку'].sum() if not df_receipt_history.empty else 0:.2f} ₽"},
-        {"Услуга фулфилмента": "Поштучная обработка, пересчет и стикерование товара", "База расчета": f"{total_pcs_received_period} шт. оприходовано", "Тарифная ставка": f"{st.session_state.piece_receive_rate:.2f} ₽ за 1 штуку", "Итого к списанию (₽)": f"{df_receipt_history[(df_receipt_history['Дата операции'] >= st.session_state.start_period) & (df_receipt_history['Дата операции'] <= st.session_state.end_period)]['Сумма за обработку'].sum() if not df_receipt_history.empty else 0:.2f} ₽"}
+        {"Услуга фулфилмента": "Разгрузка прибывших коробов с машиной", "База расчета": f"{total_boxes_unloaded_period} кор. разгружено", "Тарифная ставка": f"{st.session_state.box_unload_rate:.2f} ₽ за 1 короб", "Итого к списанию (₽)": f"{total_boxes_unloaded_period * st.session_state.box_unload_rate:.2f} ₽"},
+        {"Услуга фулфилмента": "Поштучная обработка, пересчет и стикерование товара", "База расчета": f"{total_pcs_received_period} шт. оприходовано", "Тарифная ставка": f"{st.session_state.piece_receive_rate:.2f} ₽ за 1 штуку", "Итого к списанию (₽)": f"{total_pcs_received_period * st.session_state.piece_receive_rate:.2f} ₽"}
     ]
     st.table(pd.DataFrame(billing_period_data))
     st.success(f"💰 **ОБЩИЙ СЧЕТ К СУММАРНОМУ СПИСАНИЮ С БАЛАНСА СЕЛЛЕРА ЗА ПЕРИОД:** **{grand_total_period:.2f} ₽**")
