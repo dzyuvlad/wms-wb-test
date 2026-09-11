@@ -74,7 +74,7 @@ with tab_receive:
     
     col_step1, col_step2 = st.columns(2)
     with col_step1:
-        select_ff = st.selectbox("Внутренний код артикула фулфилмента (ФФ):", existing_ff_skus + ["+ Создать новый ФФ-Артикул"])
+        select_ff = st.selectbox("Выберите внутренний артикул ФФ:", existing_ff_skus + ["+ Создать новый ФФ-Артикул"])
         if select_ff == "+ Создать новый ФФ-Артикул":
             target_ff_sku = st.text_input("Присвойте новый код ФФ:", value="ФФ-ТОВАР-02")
             ff_name = st.text_input("Введите название товара для склада:", value="Сушилка для обуви с УФ-лампой")
@@ -154,7 +154,7 @@ with tab_receive:
                 })
                 st.success("Акт успешно записан!")
                 st.rerun()
-# ВКЛАДКА 2: МАТРИЦА ЕДИНОГО СТОКА (ИСПРАВЛЕННЫЙ ЖЕСТКИЙ УЧЕТ FBS ОСТАТКОВ В КУБАТУРЕ ХРАНЕНИЯ)
+# ВКЛАДКА 2: МАТРИЦА ЕДИНОГО СТОКА (ИСПРАВЛЕНО НАЗВАНИЕ КОЛОНКИ ДЛЯ ИСКЛЮЧЕНИЯ KEYERROR)
 with tab_stocks:
     st.subheader("📊 Оперативная мультиканальная матрица Единого Стока")
     
@@ -174,12 +174,10 @@ with tab_stocks:
                         total_live_fbs_on_marketplaces += mp_stock
                         connected_channels_list.append(f"{rule['Магазин']} (SKU: {rule['Артикул продавца']} | Сток: {mp_stock} шт.)")
         
-        # Расчет чистого остатка на полках
+        # Чистый физический остаток на полках склада
         phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders)
         
-        # --- ФИКС ФОРМУЛЫ ХРАНЕНИЯ ДЛЯ ПЛАТНОЙ КУБАТУРЫ ---
-        # Чтобы остатки FBS гарантированно учитывались и селлер платил за них кубометры,
-        # мы рассчитываем объем хранения на базе СУММЫ полок и живых FBS-лимитов на МП
+        # Полная сумма штук, занимающих место на ваших полках (включая FBS лимиты)
         total_billable_pcs_including_fbs = phys_stock_on_shelves + total_live_fbs_on_marketplaces
         
         unit_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
@@ -188,20 +186,33 @@ with tab_stocks:
         
         channels_str = ", \n".join(connected_channels_list) if connected_channels_list else "⚠️ Нет привязанных витрин"
         
+        # НАЗВАНИЕ КОЛОНКИ ИДЕАЛЬНО ВЫРАВНЕНО С ВЫВОДОМ НА ЭКРАН (УСТРАНЕНИЕ СБОЯ СТРОКИ 203)
         rows_unified.append({
-            "Внутренний Код ФФ": ff_sku, "Описание товара": data['name'], "Габариты упаковки (ЗАМЕР СКЛАДА)": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
-            "📦 НА ПОЛКАХ (ФИЗ, шт)": phys_stock_on_shelves, "Из них выставлено под FBS менеджером (шт)": total_live_fbs_on_marketplaces, "Остаток на FBO маркетплейсов": data['fbo_allocated'], "Активный объем тарификации (м³)": total_sku_m3, "Детализация связанных витрин селлера": channels_str
+            "Внутренний Код ФФ": ff_sku, 
+            "Описание товара": data['name'], 
+            "Габариты упаковки (ЗАМЕР СКЛАДА)": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
+            "📦 НА ПОЛКАХ (Платное хранение, шт)": total_billable_pcs_including_fbs, 
+            "Из них выставлено под FBS менеджером (шт)": total_live_fbs_on_marketplaces, 
+            "Уехало на FBO маркетплейсов": data['fbo_allocated'], 
+            "Детализация связанных витрин селлера": channels_str
         })
         
     if rows_unified:
         df_unified_matrix = pd.DataFrame(rows_unified)
         k1, k2, k3 = st.columns(3)
         with k1: st.metric("Всего позиций ФФ", len(df_unified_matrix))
-        with k2: st.metric("Всего штук на платном хранении фулфилмента (Физ + FBS)", int(df_unified_matrix["📦 НА ПОЛКАХ (ФИЗ, шт)"].sum() + df_unified_matrix["Из них выставлено под FBS менеджером (шт)"].sum()))
+        with k2: st.metric("Всего штук на платном хранении фулфилмента (Физ + FBS)", int(df_unified_matrix["📦 НА ПОЛКАХ (Платное хранение, шт)"].sum()))
         with k3: st.metric("Активный тарифицируемый объем (м³)", f"{total_warehouse_m3:.4f} м³")
         st.write("---")
-        st.dataframe(df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "Габариты упаковки (ЗАМЕР СКЛАДА)", "📦 НА ВАШИХ ПОЛКАХ (ФИЗ, шт)", "Из них выставлено под FBS менеджером (шт)", "Остаток на FBO маркетплейсов", "Детализация связанных витрин селлера"]], use_container_width=True, hide_index=True)
-    else: st.info("Склад пуст. Проведите приемку в первой вкладке.")
+        
+        # ИСПРАВЛЕНО: Теперь названия колонок внутри квадратных скобок на 100% совпадают с rows_unified
+        st.dataframe(
+            df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "Габариты упаковки (ЗАМЕР СКЛАДА)", "📦 НА ПОЛКАХ (Платное хранение, шт)", "Из них выставлено под FBS менеджером (шт)", "Уехало на FBO маркетплейсов", "Детализация связанных витрин селлера"]], 
+            use_container_width=True, 
+            hide_index=True
+        )
+    else: 
+        st.info("Склад пуст. Проведите приемку в первой вкладке.")
 
 # ВКЛАДКА 3: СЧЕТА И СКВОЗНОЙ ПООПЕРАЦИОННЫЙ БИЛЛИНГ С УЧЕТОМ ЖУРНАЛА ПРИХОДОВ ЗА ПЕРИОД
 with tab_billing:
@@ -242,7 +253,6 @@ with tab_billing:
     
     total_storage_cost_period = total_warehouse_m3 * st.session_state.m3_rate * days_in_period
     total_processing_cost_period = 5 * st.session_state.fbs_processing_rate
-    # Журнал приходов принудительно включен в финальное финансовое суммирование акта
     grand_total_period = total_storage_cost_period + total_processing_cost_period + total_receipt_billing_period
 
     billing_period_data = [
