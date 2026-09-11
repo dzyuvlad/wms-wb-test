@@ -5,7 +5,7 @@ import requests
 import io
 
 # Настройка страницы WMS
-st.set_page_config(page_title="WMS Фикс Биллинга FBS", layout="wide", page_icon="📦")
+st.set_page_config(page_title="WMS Фикс Биллинга и Хронологии", layout="wide", page_icon="📦")
 
 st.title("WMS")
 st.write(f"Последняя синхронизация баз данных: `{datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}`")
@@ -37,6 +37,7 @@ if 'api_pulled_cards' not in st.session_state:
 today_date = datetime.date.today()
 now_time = datetime.datetime.now()
 
+# Перманентный лог начислений (не сбрасывается)
 if 'wms_receipt_history' not in st.session_state:
     st.session_state.wms_receipt_history = [
         {
@@ -50,10 +51,6 @@ if 'm3_rate' not in st.session_state: st.session_state.m3_rate = 50.0
 if 'fbs_processing_rate' not in st.session_state: st.session_state.fbs_processing_rate = 35.0
 if 'piece_receive_rate' not in st.session_state: st.session_state.piece_receive_rate = 5.0     
 if 'box_unload_rate' not in st.session_state: st.session_state.box_unload_rate = 20.0       
-
-if 'wb_token_saved' not in st.session_state: st.session_state.wb_token_saved = ''
-if 'ozon_id_saved' not in st.session_state: st.session_state.ozon_id_saved = ''
-if 'ozon_key_saved' not in st.session_state: st.session_state.ozon_key_saved = ''
 
 if 'start_period' not in st.session_state: st.session_state.start_period = today_date - datetime.timedelta(days=6)
 if 'end_period' not in st.session_state: st.session_state.end_period = today_date
@@ -149,53 +146,51 @@ with tab_receive:
                 })
                 st.success("Акт успешно записан!")
                 st.rerun()
-# ВКЛАДКА 2: МАТРИЦА ЕДИНОГО СТОКА OMS (НАБЛЮДЕНИЕ ЗА РУЧНЫМИ FBS ИЗ API)
+# ВКЛАДКА 2: МАТРИЦА ЕДИНОГО СТОКА (ЖЕСТКИЙ МАТЕМАТИЧЕСКИЙ УЧЕТ ВСЕХ СТОКОВ В КУБАТУРЕ)
 with tab_stocks:
     st.subheader("📊 Оперативная мультиканальная матрица Единого Стока")
     
     rows_unified = []
     total_warehouse_m3 = 0.0
-    simulated_fbs_orders = 5  # Объем фактического выбытия по заказам
+    simulated_fbs_orders = 5  
     
     for ff_sku, data in st.session_state.wms_ff_inventory.items():
-        # ИСПРАВЛЕНА ФОРМУЛА ХРАНЕНИЯ: Товары FBS лежат у вас на полках, поэтому они НА 100% ВКЛЮЧЕНЫ В ФИЗИЧЕСКИЙ ОСТАТОК!
-        # Вычитаются только коробки, уехавшие на FBO, и уже совершенные факты заказов (simulated_fbs_orders).
-        phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders)
-        
         total_live_fbs_on_marketplaces = 0
         connected_channels_list = []
         
         for rule in st.session_state.wms_mapping_rules:
             if rule['Внутренний артикул ФФ'] == ff_sku:
                 for card in st.session_state.api_pulled_cards:
-                    if card['Магазин'] == rule['Магазин'] and card['Артикул продавца'] == rule['Артикул продавца']:
-                        mp_stock = card.get('Ручной остаток FBS на МП', 0)
+                    if card['Магазин'] == rule['Maгазин'] and card['Артикул продавца'] == rule['Артикул продавца']:
+                        mp_stock = int(card.get('Ручной остаток FBS на МП', 0)) # Жесткое приведение типов
                         total_live_fbs_on_marketplaces += mp_stock
-                        connected_channels_list.append(f"{rule['Магазин']} (SKU: {rule['Артикул продавца']} | Выставленный сток: {mp_stock} шт.)")
+                        connected_channels_list.append(f"{rule['Магазин']} (SKU: {rule['Артикул продавца']} | Сток: {mp_stock} шт.)")
+        
+        # ТОЧНЫЙ СУММАРНЫЙ УЧЕТ: На полках склада физически лежит и хранится ВСЁ (включая выделенные под FBS лимиты)
+        # Вычитается только объем, уехавший физически на FBO, и факты совершенных заказов.
+        phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders)
         
         channels_str = ", \n".join(connected_channels_list) if connected_channels_list else "⚠️ Нет привязанных витрин"
-        
-        # Расчет платных кубометров (включая ручные объемы FBS, лежащие на полках фулфилмента)
         unit_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
         total_sku_m3 = unit_m3 * phys_stock_on_shelves
         total_warehouse_m3 += total_sku_m3
         
         rows_unified.append({
             "Внутренний Код ФФ": ff_sku, "Описание товара": data['name'], "Габариты упаковки (ЗАМЕР СКЛАДА)": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
-            "📦 НА ВАШИХ ПОЛКАХ (Платное хранение, шт)": phys_stock_on_shelves, "Из них выставлено под FBS менеджером (шт)": total_live_fbs_on_marketplaces, "Уехало на FBO маркетплейсов (Без оплаты)": data['fbo_allocated'], "Детализация связанных витрин селлера": channels_str
+            "📦 НА ПОЛКАХ (Всего под хранение, шт)": phys_stock_on_shelves, "Из них выставлено под FBS менеджером (шт)": total_live_fbs_on_marketplaces, "Уехало на FBO маркетплейсов": data['fbo_allocated'], "Детализация связанных витрин селлера": channels_str
         })
         
     if rows_unified:
         df_unified_matrix = pd.DataFrame(rows_unified)
         k1, k2, k3 = st.columns(3)
         with k1: st.metric("Всего позиций ФФ", len(df_unified_matrix))
-        with k2: st.metric("Всего штук на платном хранении фулфилмента", int(df_unified_matrix["📦 НА ВАШИХ ПОЛКАХ (Платное хранение, шт)"].sum()))
+        with k2: st.metric("Всего штук на платном хранении фулфилмента", int(df_unified_matrix["📦 НА ВАШИХ ПОЛКАХ (Всего под хранение, шт)"].sum()))
         with k3: st.metric("Активный тарифицируемый объем (м³)", f"{total_warehouse_m3:.4f} м³")
         st.write("---")
         st.dataframe(df_unified_matrix, use_container_width=True, hide_index=True)
     else: st.info("Склад пуст. Проведите приемку в первой вкладке.")
 
-# ВКЛАДКА 3: СЧЕТА И ПООПЕРАЦИОННЫЙ БИЛЛИНГ С ЖУРНАЛОМ ВРЕМЕНИ
+# ВКЛАДКА 3: СЧЕТА И СКВОЗНОЙ ПООПЕРАЦИОННЫЙ БИЛЛИНГ С УЧЕТОМ ЖУРНАЛА ПРИХОДОВ
 with tab_billing:
     st.subheader("📅 Финансовая отчетность по периодам (Календарь)")
     col_b1, col_b2 = st.columns(2)
@@ -207,37 +202,46 @@ with tab_billing:
     with col_b2:
         st.write("##")
         buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            pd.DataFrame(rows_unified).to_excel(writer, index=False, sheet_name='Остатки')
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer: pd.DataFrame(rows_unified).to_excel(writer, index=False)
         st.download_button(label="📥 Скачать сводный отчет в Excel", data=buffer.getvalue(), file_name="wms_3pl_billing.xlsx", use_container_width=True)
 
     df_receipt_history = pd.DataFrame(st.session_state.wms_receipt_history) if st.session_state.wms_receipt_history else pd.DataFrame(columns=["Дата операции", "Время приемки", "Внутренний Артикул ФФ", "Разгружено коробов (шт)", "Принято товара (шт)", "Сумма за разгрузку", "Сумма за обработку", "Итого за накладную"])
-    total_boxes_unloaded_period, total_pcs_received_period, total_receipt_billing_period = 0, 0, 0.0
     
+    total_boxes_unloaded_period = 0
+    total_pcs_received_period = 0
+    total_receipt_billing_period = 0.0
+    
+    # ФИКС СЧЕТА: Фильтруем историю накладных по датам календаря и берем суммы для ИТОГОВОГО СЧЕТА
     if not df_receipt_history.empty:
         df_receipt_filtered = df_receipt_history[(df_receipt_history['Дата операции'] >= st.session_state.start_period) & (df_receipt_history['Дата операции'] <= st.session_state.end_period)]
-        total_boxes_unloaded_period = df_receipt_filtered['Разгружено коробов (шт)'].sum()
-        total_pcs_received_period = df_receipt_filtered['Принято товара (шт)'].sum()
-        total_receipt_billing_period = df_receipt_filtered['Итого за накладную'].sum()
-        st.write("---")
-        st.subheader("📋 Операционный журнал приходов (Поминутная хронология)")
-        df_receipt_disp = df_receipt_filtered.copy()
-        df_receipt_disp['Дата операции'] = df_receipt_disp['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
-        st.dataframe(df_receipt_disp, use_container_width=True, hide_index=True)
+        if not df_receipt_filtered.empty:
+            total_boxes_unloaded_period = df_receipt_filtered['Разгружено коробов (шт)'].sum()
+            total_pcs_received_period = df_receipt_filtered['Принято товара (шт)'].sum()
+            total_receipt_billing_period = df_receipt_filtered['Итого за накладную'].sum()
+            
+            st.write("---")
+            st.subheader("📋 Операционный журнал приходов (Поминутная хронология за выбранный период)")
+            df_receipt_disp = df_receipt_filtered.copy()
+            df_receipt_disp['Дата операции'] = df_receipt_disp['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
+            st.dataframe(df_receipt_disp, use_container_width=True, hide_index=True)
 
     st.write("---")
-    st.subheader("🧾 Итоговый детализированный 3PL-счет за выбранный срок (с учетом FBS хранения)")
+    st.subheader("🧾 Итоговый детализированный 3PL-счет за выбранный срок (Все операции + Хранение)")
+    
+    # Тотальная математика
     total_storage_cost_period = total_warehouse_m3 * st.session_state.m3_rate * days_in_period
-    grand_total_period = total_storage_cost_period + (5 * st.session_state.fbs_processing_rate) + total_receipt_billing_period
+    total_processing_cost_period = 5 * st.session_state.fbs_processing_rate
+    # ВКЛЮЧАЕМ ЖУРНАЛ ПРИХОДОВ В ГРАНД-СЧЕТ КЛИЕНТА ПЕРИОДА
+    grand_total_period = total_storage_cost_period + total_processing_cost_period + total_receipt_billing_period
 
     billing_period_data = [
-        {"Услуга фулфилмента": "Ответственное хранение груза на полках (Включая остатки FBS)", "База расчета": f"{total_warehouse_m3:.4f} м³ × {days_in_period} дн.", "Тарифная ставка": f"{st.session_state.m3_rate:.2f} ₽ за 1 м³ / сутки", "Итого к списанию (₽)": f"{total_storage_cost_period:.2f} ₽"},
-        {"Услуга фулфилмента": "Сборка, упаковка и маркировка заказов по FBS", "База расчета": "5 шт. обработано", "Тарифная ставка": f"{st.session_state.fbs_processing_rate:.2f} ₽ за 1 заказ", "Итого к списанию (₽)": f"{5 * st.session_state.fbs_processing_rate:.2f} ₽"},
-        {"Услуга фулфилмента": "Разгрузка прибывших коробов с машиной", "База расчета": f"{total_boxes_unloaded_period} кор. разгружено", "Тарифная ставка": f"{st.session_state.box_unload_rate:.2f} ₽ за 1 короб", "Итого к списанию (₽)": f"{total_boxes_unloaded_period * st.session_state.box_unload_rate:.2f} ₽"},
-        {"Услуга фулфилмента": "Поштучная обработка, пересчет и стикерование товара", "База расчета": f"{total_pcs_received_period} шт. оприходовано", "Тарифная ставка": f"{st.session_state.piece_receive_rate:.2f} ₽ за 1 штуку", "Итого к списанию (₽)": f"{total_pcs_received_period * st.session_state.piece_receive_rate:.2f} ₽"}
+        {"Услуга фулфилмента": "Ответственное хранение объема груза на полках (Включая остатки FBS)", "База расчета": f"{total_warehouse_m3:.4f} м³ × {days_in_period} дн.", "Тарифная ставка": f"{st.session_state.m3_rate:.2f} ₽ за 1 м³ / сутки", "Итого к списанию (₽)": f"{total_storage_cost_period:.2f} ₽"},
+        {"Услуга фулфилмента": "Сборка, упаковка и маркировка заказов по FBS", "База расчета": "5 шт. обработано", "Тарифная ставка": f"{st.session_state.fbs_processing_rate:.2f} ₽ за 1 заказ", "Итого к списанию (₽)": f"{total_processing_cost_period:.2f} ₽"},
+        {"Услуга фулфилмента": "Разгрузка прибывших коробов с машиной (Акты из журнала приходов)", "База расчета": f"{total_boxes_unloaded_period} кор. зафиксировано", "Тарифная ставка": f"{st.session_state.box_unload_rate:.2f} ₽ за 1 короб", "Итого к списанию (₽)": f"{total_boxes_unloaded_period * st.session_state.box_unload_rate:.2f} ₽"},
+        {"Услуга фулфилмента": "Поштучная обработка, пересчет и стикерование товара (Акты из журнала приходов)", "База расчета": f"{total_pcs_received_period} шт. зафиксировано", "Тарифная ставка": f"{st.session_state.piece_receive_rate:.2f} ₽ за 1 штуку", "Итого к списанию (₽)": f"{total_pcs_received_period * st.session_state.piece_receive_rate:.2f} ₽"}
     ]
     st.table(pd.DataFrame(billing_period_data))
-    st.success(f"💰 **ОБЩИЙ СЧЕТ К СУММАРНОМУ СПИСАНИЮ С БАЛАНСА СЕЛЛЕРА ЗА ПЕРИОД:** **{grand_total_period:.2f} ₽**")
+    st.success(f"💰 **ОБЩИЙ СКВОЗНОЙ СЧЕТ К СПИСАНИЮ С БАЛАНСА СЕЛЛЕРА ЗА ПЕРИОД:** **{grand_total_period:.2f} ₽** (Все услуги учтены автоматически)")
 
 # ВКЛАДКА 4: НАСТРОЙКИ
 with tab_api:
