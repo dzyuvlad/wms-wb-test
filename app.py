@@ -72,16 +72,20 @@ with tab_receive:
 
     with col_step2:
         st.markdown("**🔗 Шаг 2: Привязка карточек маркетплейсов к этому товару**")
-        search_query = st.text_input("🔍 Умный поиск по артикулу продавца:", value="", help="Просто начните вводить цифры или буквы артикула селлера").strip()
         
-        # ФИКС: Текст "SKU:" полностью удален. Теперь строка начинается ровно со значения артикула продавца!
+        # ЖЕСТКИЙ ФИКС ПОИСКА: Сначала менеджер вбивает текст в это поле
+        search_query = st.text_input("🔍 Быстрый поиск по артикулу продавца:", value="", placeholder="Например: 001 или сушилка").strip().lower()
+        
+        # Конструируем чистые опции (Артикул в самом начале)
         api_options = {f"{c['Артикул продавца']} | {c['Название на витрине']} | [{c['Магазин']}]": idx for idx, c in enumerate(st.session_state.api_pulled_cards)}
         
+        # Принудительная фильтрация на уровне Python (проверяем, входит ли поисковый запрос в артикул)
         if search_query:
-            filtered_api_options = {lbl: idx for lbl, idx in api_options.items() if search_query.lower() in st.session_state.api_pulled_cards[idx]['Артикул продавца'].lower()}
+            filtered_api_options = {lbl: idx for lbl, idx in api_options.items() if search_query in st.session_state.api_pulled_cards[idx]['Артикул продавца'].lower()}
         else:
             filtered_api_options = api_options
 
+        # Формируем список того, что уже было привязано ранее
         pre_selected = []
         for rule in st.session_state.wms_mapping_rules:
             if rule['Внутренний артикул ФФ'] == target_ff_sku:
@@ -90,7 +94,12 @@ with tab_receive:
                     if card['Магазин'] == rule['Магазин'] and card['Артикул продавца'] == rule['Артикул продавца']:
                         pre_selected.append(label)
         
-        selected_labels = st.multiselect("Выберите карточки маркетплейсов:", list(filtered_api_options.keys()), default=[p for p in pre_selected if p in filtered_api_options])
+        # Мультиселектор теперь получает строго отфильтрованный, суженый список вариантов!
+        selected_labels = st.multiselect(
+            "Доступные карточки для привязки (отфильтровано поиском):", 
+            list(filtered_api_options.keys()), 
+            default=[p for p in pre_selected if p in filtered_api_options]
+        )
         
         if st.button("🔗 Утвердить общую группу связок Единого Стока", use_container_width=True):
             st.session_state.wms_mapping_rules = [r for r in st.session_state.wms_mapping_rules if r['Внутренний артикул ФФ'] != target_ff_sku]
@@ -164,7 +173,6 @@ with tab_stocks:
         unit_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
         total_sku_m3 = unit_m3 * total_billable_pcs_including_fbs
         total_warehouse_m3 += total_sku_m3
-        
         channels_str = ", \n".join(connected_channels_list) if connected_channels_list else "⚠️ Нет привязанных витрин"
         current_sku_rate = data.get('piece_rate', st.session_state.default_piece_rate)
         
@@ -217,7 +225,7 @@ with tab_billing:
                 df_excel_receipt.to_excel(writer, index=False, sheet_name='Журнал приемок по времени')
             else: pd.DataFrame(columns=["Нет приходов за период"]).to_excel(writer, index=False, sheet_name='Журнал приходов')
                 
-        st.download_button(label="📥 Скачать сводный отчёт WMS + Журнал приемок в Excel", data=buffer.getvalue(), file_name=f"wms_3pl_report.xlsx", use_container_width=True)
+        st.download_button(label="📥 Скачать сводный отчёт WMS + Журнал приемок в Excel", data=buffer.getvalue(), file_name="wms_3pl_report.xlsx", use_container_width=True)
 
     if not df_receipt_filtered.empty:
         st.write("---")
