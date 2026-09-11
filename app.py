@@ -34,7 +34,6 @@ if 'm3_rate' not in st.session_state: st.session_state.m3_rate = 50.0
 if 'fbs_processing_rate' not in st.session_state: st.session_state.fbs_processing_rate = 35.0
 if 'box_unload_rate' not in st.session_state: st.session_state.box_unload_rate = 20.0       
 
-# Базовый дефолтный тариф за штуку (используется как подсказка при создании новых артикулов)
 if 'default_piece_rate' not in st.session_state: st.session_state.default_piece_rate = 5.0
 
 if 'wb_token_saved' not in st.session_state: st.session_state.wb_token_saved = ''
@@ -61,7 +60,6 @@ with tab_receive:
             c_l = st.number_input("Длина упаковки (см):", min_value=0.1, value=20.0)
             c_w = st.number_input("Ширина упаковки (см):", min_value=0.1, value=15.0)
             c_h = st.number_input("Высота упаковки (см):", min_value=0.1, value=10.0)
-            # Фиксация персонального тарифа для нового артикула
             sku_piece_rate = st.number_input("Фиксированный тариф за обработку 1 шт данного артикула (₽):", min_value=0.0, value=float(st.session_state.default_piece_rate), step=0.5, key="rate_new")
         else:
             target_ff_sku = select_ff
@@ -69,18 +67,18 @@ with tab_receive:
             c_l = st.number_input("Длина упаковки (см):", min_value=0.1, value=float(st.session_state.wms_ff_inventory[select_ff]['length_cm']))
             c_w = st.number_input("Ширина упаковки (см):", min_value=0.1, value=float(st.session_state.wms_ff_inventory[select_ff]['width_cm']))
             c_h = st.number_input("Высота упаковки (см):", min_value=0.1, value=float(st.session_state.wms_ff_inventory[select_ff]['height_cm']))
-            # Извлечение ранее сохраненного тарифа из карточки этого конкретного товара
             saved_rate = st.session_state.wms_ff_inventory[select_ff].get('piece_rate', st.session_state.default_piece_rate)
             sku_piece_rate = st.number_input("Фиксированный тариф за обработку 1 шт данного артикула (₽):", min_value=0.0, value=float(saved_rate), step=0.5, key="rate_old")
 
     with col_step2:
         st.markdown("**🔗 Шаг 2: Привязка карточек маркетплейсов к этому товару**")
-        search_query = st.text_input("🔍 Умный поиск по артикулу продавца:", value="", help="Вбейте артикул с накладной для быстрой фильтрации")
+        search_query = st.text_input("🔍 Умный поиск по артикулу продавца:", value="", help="Просто начните вводить цифры или буквы артикула селлера").strip()
         
-        api_options = {f"[{c['Магазин']}] SKU: {c['Артикул продавца']} | {c['Название на витрине']}": idx for idx, c in enumerate(st.session_state.api_pulled_cards)}
+        # ФИКС: Текст "SKU:" полностью удален. Теперь строка начинается ровно со значения артикула продавца!
+        api_options = {f"{c['Артикул продавца']} | {c['Название на витрине']} | [{c['Магазин']}]": idx for idx, c in enumerate(st.session_state.api_pulled_cards)}
         
         if search_query:
-            filtered_api_options = {lbl: idx for lbl, idx in api_options.items() if search_query.strip().lower() in st.session_state.api_pulled_cards[idx]['Артикул продавца'].lower()}
+            filtered_api_options = {lbl: idx for lbl, idx in api_options.items() if search_query.lower() in st.session_state.api_pulled_cards[idx]['Артикул продавца'].lower()}
         else:
             filtered_api_options = api_options
 
@@ -115,7 +113,6 @@ with tab_receive:
     with col_qty2:
         calculated_total_pcs = input_boxes * input_pcs_in_box
         cost_unload = input_boxes * st.session_state.box_unload_rate
-        # РАСЧЕТ НА БАЗЕ ПОАРТИКУЛЬНОЙ СТАВКИ ТОВАРА
         cost_check = calculated_total_pcs * sku_piece_rate
         total_receipt_cost = cost_unload + cost_check
         unit_m3_calc = (c_l * c_w * c_h) / 1000000
@@ -129,13 +126,12 @@ with tab_receive:
                 current_time_stamp = datetime.datetime.now()
                 st.session_state.wms_ff_inventory[target_ff_sku] = {
                     'name': ff_name, 'length_cm': c_l, 'width_cm': c_w, 'height_cm': c_h,
-                    'piece_rate': sku_piece_rate, # Запоминаем фиксированный тариф в карточке ФФ-артикула
+                    'piece_rate': sku_piece_rate,
                     'boxes': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('boxes', 0) + input_boxes,
                     'pcs_in_box': input_pcs_in_box,
                     'physical_stock': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('physical_stock', 0) + calculated_total_pcs,
                     'fbo_allocated': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('fbo_allocated', 0)
                 }
-                # Запись в историю с фиксацией тарифа, действовавшего в момент этой операции
                 st.session_state.wms_receipt_history.append({
                     "Дата операции": current_time_stamp.date(), "Время приемки": current_time_stamp.strftime('%H:%M:%S'), 
                     "Внутренний Артикул ФФ": target_ff_sku, "Разгружено коробов (шт)": input_boxes, "Принято товара (шт)": calculated_total_pcs, 
@@ -160,7 +156,7 @@ with tab_stocks:
                     if card['Магазин'] == rule['Магазин'] and card['Артикул продавца'] == rule['Артикул продавца']:
                         mp_stock = int(card.get('Ручной остаток FBS на МП', 0)) 
                         total_live_fbs_on_marketplaces += mp_stock
-                        connected_channels_list.append(f"{rule['Магазин']} (SKU: {rule['Артикул продавца']} | Сток: {mp_stock} шт.)")
+                        connected_channels_list.append(f"{rule['Артикул продавца']} | {rule['Магазин']} (Сток: {mp_stock} шт.)")
         
         phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders)
         total_billable_pcs_including_fbs = phys_stock_on_shelves + total_live_fbs_on_marketplaces
@@ -189,7 +185,7 @@ with tab_stocks:
     else: 
         st.info("👋 Склад полностью пуст. Перейдите на первую вкладку, чтобы создать ваш первый внутренний ФФ-артикул, обмерить его габариты и выполнить приемку коробок.")
 
-# ВКЛАДКА 3: СЧЕТА И СКВОЗНОЙ ПООПЕРАЦИОННЫЙ БИЛЛИНГ ПО ИНДИВИДУАЛЬНЫМ ТАРИФАМ
+# ВКЛАДКА 3: СЧЕТА И СКВОЗНОЙ ПООПЕРАЦИОННЫЙ БИЛЛИНГ
 with tab_billing:
     st.subheader("📅 Финансовая отчетность по периодам (Календарь)")
     col_b1, col_b2 = st.columns(2)
@@ -225,7 +221,7 @@ with tab_billing:
 
     if not df_receipt_filtered.empty:
         st.write("---")
-        st.subheader("📋 Операционный журнал приходов (Поминутная хронология с учетом поартикульных ставок)")
+        st.subheader("📋 Операционный журнал приходов (Поминутная хронология)")
         df_receipt_disp = df_receipt_filtered.copy()
         df_receipt_disp['Дата операции'] = df_receipt_disp['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
         st.dataframe(df_receipt_disp, use_container_width=True, hide_index=True)
@@ -242,7 +238,7 @@ with tab_billing:
         {"Услуга фулфилмента": "Поартикульная обработка, пересчет и стикерование груза", "База расчета": "Сумма по накладным из журнала операций", "Тарифная ставка": "Индивидуальная по каждому SKU", "Итого к списанию (₽)": f"{df_receipt_filtered['Сумма за обработку'].sum() if not df_receipt_filtered.empty else 0:.2f} ₽"}
     ]
     st.table(pd.DataFrame(billing_period_data))
-    st.success(f"💰 **ОБЩИЙ СКВОЗНОЙ СЧЕТ К СУММАРНОМУ СПИСАНИЮ С БАЛАНСА СЕЛЛЕРА ЗА ПЕРИОД:** **{grand_total_period:.2f} ₽** (Поартикульные тарифы обработки учтены автоматически)")
+    st.success(f"💰 **ОБЩИЙ СКВОЗНОЙ СЧЕТ К СУММАРНОМУ СПИСАНИЮ С БАЛАНСА СЕЛЛЕРА ЗА ПЕРИОД:** **{grand_total_period:.2f} ₽**")
 
 # ВКЛАДКА 4: НАСТРОЙКИ
 with tab_api:
@@ -253,7 +249,7 @@ with tab_api:
         st.session_state.m3_rate = st.number_input("Стоимость хранения 1 м³ груза в сутки (₽):", min_value=0.0, value=float(st.session_state.m3_rate), step=1.0)
         st.session_state.fbs_processing_rate = st.number_input("Стоимость сборки одного заказа FBS (₽):", min_value=0.0, value=float(st.session_state.fbs_processing_rate), step=1.0)
         st.session_state.box_unload_rate = st.number_input("Тариф за физическую разгрузку 1 короба с машины (₽):", min_value=0.0, value=float(st.session_state.box_unload_rate), step=1.0)
-        st.session_state.default_piece_rate = st.number_input("Базовый тариф обработки за 1 шт по умолчанию (подсказка для новых SKU, ₽):", min_value=0.0, value=float(st.session_state.default_piece_rate), step=0.5)
+        st.session_state.default_piece_rate = st.number_input("Базовый тариф обработки за 1 шт по умолчанию (₽):", min_value=0.0, value=float(st.session_state.default_piece_rate), step=0.5)
     with col_t2:
         st.markdown("**Авторизация личных кабинетов маркетплейсов**")
         input_wb = st.text_input("Введите API Токен WB (тип 'Контент'):", type="password", value=st.session_state.wb_token_saved)
