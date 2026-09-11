@@ -5,13 +5,13 @@ import requests
 import io
 
 # Настройка страницы WMS
-st.set_page_config(page_title="WMS Сквозной ОМС", layout="wide", page_icon="🌐")
+st.set_page_config(page_title="WMS Ручные Габариты OMS", layout="wide", page_icon="🌐")
 
-st.title("🌐 Мультиканальная WMS: Справочник связок и мониторинг ручных остатков FBS")
+st.title("🌐 Мультиканальная WMS: Фиксация реальных габаритов и Единый Сток OMS")
 st.write(f"Последняя синхронизация баз данных: `{datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}`")
 
 # --- ИНИЦИАЛИЗАЦИЯ ДИНАМИЧЕСКИХ БАЗ ДАННЫХ (ФУНДАМЕНТ OMS) ---
-# База 1: Справочник физических товаров на вашем складе (Внутренние артикулы ФФ)
+# База 1: Справочник физических товаров на вашем складе с реальными размерами, заданными вручную
 if 'wms_ff_inventory' not in st.session_state:
     st.session_state.wms_ff_inventory = {
         'ФФ-СУШИЛКА-01': {
@@ -21,14 +21,14 @@ if 'wms_ff_inventory' not in st.session_state:
         }
     }
 
-# База 2: Справочник связок (Маппинг) внешних кабинетов под ваш ФФ-код
+# База 2: Справочник связок внешних кабинетов под ваш ФФ-код
 if 'wms_mapping_rules' not in st.session_state:
     st.session_state.wms_mapping_rules = [
         {"Внутренний артикул ФФ": "ФФ-СУШИЛКА-01", "Магазин": "Wildberries (Кабинет 1)", "Артикул продавца": "001", "Баркод": "4607123456011"},
         {"Внутренний артикул ФФ": "ФФ-СУШИЛКА-01", "Магазин": "Ozon (Кабинет 1)", "Артикул продавца": "сушилка1", "Баркод": "4607123456022"},
     ]
 
-# База 3: Внешние карточки с остатками, проставленными менеджером вручную на маркетплейсах
+# База 3: Внешние карточки, полученные по API с маркетплейсов (без габаритов, только для связывания)
 if 'api_pulled_cards' not in st.session_state:
     st.session_state.api_pulled_cards = [
         {"Магазин": "Wildberries (Кабинет 1)", "Артикул продавца": "001", "Название на витрине": "Сушилка обувная электрическая", "Баркод": "4607123456011", "Ручной остаток FBS на МП": 15},
@@ -51,59 +51,70 @@ tab_receive, tab_mapping, tab_stocks, tab_billing, tab_api = st.tabs([
     "📥 Поартикульная Приемка", "🔗 Конструктор Связок (Маппинг)", "📊 Единый Сток (Матрица)", "📅 Счета и 3PL-Биллинг", "🔑 Настройки API и Тарифы"
 ])
 
-# ВКЛАДКА 1: ПРИЕМКА ТОВАРА ПО ВНУТРЕННИМ КОДАМ ФУЛФИЛМЕНТА
+# ВКЛАДКА 1: ПРИЕМКА ТОВАРА С ОБЯЗАТЕЛЬНЫМ РУЧНЫМ ОПРЕДЕЛЕНИЕМ РАЗМЕРОВ У ПАКОВКИ
 with tab_receive:
-    st.subheader("📥 Поартикульный приход груза под внутренние коды склада (ФФ)")
+    st.subheader("📥 Поартикульный приход груза и фиксация фактических габаритов")
+    st.info("📏 **Контроль кубатуры:** Введите реальные размеры единицы товара по результатам замера на складе. Эти данные защищают вашу прибыль от заниженных габаритов в ЛК селлера.")
+    
     existing_ff_skus = list(st.session_state.wms_ff_inventory.keys())
     col_r1, col_rec2 = st.columns(2)
     
     with col_r1:
-        st.markdown("**1. Выберите или создайте внутренний ФФ-Артикул склада**")
+        st.markdown("**1. Данные товара и фактический замер габаритов (1 шт)**")
         select_ff = st.selectbox("Внутренний код товара (ФФ):", existing_ff_skus + ["+ Создать новый ФФ-Артикул"])
+        
+        # Поля ввода размеров всегда открыты для ручной фиксации или проверки при каждом приходе
         if select_ff == "+ Создать новый ФФ-Артикул":
             target_ff_sku = st.text_input("Задайте новый ФФ-код:", value="ФФ-ТОВАР-02")
             ff_name = st.text_input("Описание товара для склада:", value="Сушилка для обуви с УФ-лампой")
-            c_l = st.number_input("Длина упаковки (см):", min_value=0.1, value=20.0)
-            c_w = st.number_input("Ширина упаковки (см):", min_value=0.1, value=15.0)
-            c_h = st.number_input("Высота упаковки (см):", min_value=0.1, value=10.0)
+            c_l = st.number_input("Реальная Длина упаковки (см):", min_value=0.1, value=20.0, key="len_new")
+            c_w = st.number_input("Реальная Ширина упаковки (см):", min_value=0.1, value=15.0, key="wid_new")
+            c_h = st.number_input("Реальная Высота упаковки (см):", min_value=0.1, value=10.0, key="hei_new")
         else:
             target_ff_sku = select_ff
-            ff_name = st.session_state.wms_ff_inventory[select_ff]['name']
-            c_l = st.session_state.wms_ff_inventory[select_ff]['length_cm']
-            c_w = st.session_state.wms_ff_inventory[select_ff]['width_cm']
-            c_h = st.session_state.wms_ff_inventory[select_ff]['height_cm']
-            st.info(f"📋 Выбран товар: **{ff_name}** | {c_l}x{c_w}x{c_h} см")
+            ff_name = st.text_input("Описание товара для склада:", value=st.session_state.wms_ff_inventory[select_ff]['name'])
+            # Позволяем перемерить и обновить размеры даже у старого товара, если селлер изменил упаковку
+            c_l = st.number_input("Реальная Длина упаковки (см):", min_value=0.1, value=float(st.session_state.wms_ff_inventory[select_ff]['length_cm']), key="len_old")
+            c_w = st.number_input("Реальная Ширина упаковки (см):", min_value=0.1, value=float(st.session_state.wms_ff_inventory[select_ff]['width_cm']), key="wid_old")
+            c_h = st.number_input("Реальная Высота упаковки (см):", min_value=0.1, value=float(st.session_state.wms_ff_inventory[select_ff]['height_cm']), key="hei_old")
 
     with col_rec2:
         st.markdown("**2. Ввод количества новой партии (Короба × Вложение)**")
         input_boxes = st.number_input("Количество принятых коробов (шт):", min_value=0, value=0, step=1)
         input_pcs_in_box = st.number_input("Вложение (штук внутри одного короба):", min_value=1, value=20, step=1)
+        
         calculated_total_pcs = input_boxes * input_pcs_in_box
         cost_unload = input_boxes * st.session_state.box_unload_rate
         cost_check = calculated_total_pcs * st.session_state.piece_receive_rate
         total_receipt_cost = cost_unload + cost_check
         
-        st.markdown(f"### 📐 Итого к зачислению на склад: **{calculated_total_pcs} шт.**")
+        # Рассчитываем объем одной единицы и всей партии по введенным размерам для наглядности
+        unit_m3_calc = (c_l * c_w * c_h) / 1000000
+        total_m3_calc = unit_m3_calc * calculated_total_pcs
+        
+        st.markdown(f"### 📐 Итого к зачислению: **{calculated_total_pcs} шт.**")
+        st.info(f"📊 Объем новой партии по обмерам склада: **{total_m3_calc:.4f} м³** (1 шт = {unit_m3_calc:.5f} м³)")
         st.warning(f"💰 Логистика прихода: Разгрузка {cost_unload:.2f} ₽ + Обработка {cost_check:.2f} ₽ = **{total_receipt_cost:.2f} ₽**")
         
-        if st.button("📦 Утвердить накладную приемки по ФФ", use_container_width=True):
+        if st.button("📦 Утвердить акт приемки и сохранить габариты", use_container_width=True):
             if calculated_total_pcs > 0:
-                if target_ff_sku not in st.session_state.wms_ff_inventory:
-                    st.session_state.wms_ff_inventory[target_ff_sku] = {
-                        'name': ff_name, 'length_cm': c_l, 'width_cm': c_w, 'height_cm': c_h,
-                        'boxes': input_boxes, 'pcs_in_box': input_pcs_in_box, 'physical_stock': calculated_total_pcs, 'fbo_allocated': 0
-                    }
-                else:
-                    st.session_state.wms_ff_inventory[target_ff_sku]['boxes'] += input_boxes
-                    st.session_state.wms_ff_inventory[target_ff_sku]['physical_stock'] += calculated_total_pcs
+                # Фиксируем или перезаписываем данные в карточку товара
+                st.session_state.wms_ff_inventory[target_ff_sku] = {
+                    'name': ff_name, 'length_cm': c_l, 'width_cm': c_w, 'height_cm': c_h,
+                    'boxes': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('boxes', 0) + input_boxes,
+                    'pcs_in_box': input_pcs_in_box,
+                    'physical_stock': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('physical_stock', 0) + calculated_total_pcs,
+                    'fbo_allocated': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('fbo_allocated', 0)
+                }
+                
                 st.session_state.wms_receipt_history.append({
                     "Дата операции": today_date, "Артикул": target_ff_sku, "Разгружено коробов": input_boxes, "Принято штук": calculated_total_pcs,
                     "Сумма за разгрузку": cost_unload, "Сумма за обработку": cost_check, "Итого за накладную": total_receipt_cost
                 })
-                st.success(f"Товар успешно оприходован.")
+                st.success(f"Товар успешно оприходован по реальным габаритам {c_l}x{c_w}x{c_h} см.")
                 st.rerun()
 
-# ВКЛАДКА 2: КОНСТРУКТОР СВЯЗОК (МАППИНГ)
+# ВКЛАДКА 2: КОНСТРУКТОР СВЯЗОК
 with tab_mapping:
     st.subheader("🔗 Конструктор связок: Объединение внешних артикулов маркетплейсов под ваш ФФ-код")
     col_map1, col_map2 = st.columns(2)
@@ -125,26 +136,22 @@ with tab_mapping:
     st.write("---")
     st.markdown("**📂 Действующие правила маппинга (Справочник связок)**")
     st.table(pd.DataFrame(st.session_state.wms_mapping_rules))
-# ВКЛАДКА 3: МАТРИЦА ЕДИНОГО СТОКА OMS (ТОЛЬКО ОТОБРАЖЕНИЕ РУЧНЫХ FBS ИЗ API)
+# ВКЛАДКА 3: МАТРИЦА ЕДИНОГО СТОКА OMS (ВЫВОД НАБЛЮДЕНИЯ ЗА РУЧНЫМИ FBS С МП)
 with tab_stocks:
     st.subheader("📊 Оперативная мультиканальная матрица Единого Стока")
-    st.info("🔎 **Справочный мониторинг:** Остатки FBS проставляются менеджером вручную на самих маркетплейсах. WMS по API считывает эти цифры для визуализации и сквозного контроля остатков.")
     
     rows_unified = []
     total_warehouse_m3 = 0.0
-    simulated_fbs_orders = 5  # Условные заказы покупателей по FBS
+    simulated_fbs_orders = 5  
     
     for ff_sku, data in st.session_state.wms_ff_inventory.items():
-        # Математика физического остатка на полках фулфилмента (Приняли - отгрузили FBO - отгрузили по FBS заказам)
         phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders)
         
-        # Считаем сумму ручных FBS остатков по всем привязанным кабинетам маркетплейсов для этого ФФ-товара
         total_live_fbs_on_marketplaces = 0
         connected_channels_list = []
         
         for rule in st.session_state.wms_mapping_rules:
             if rule['Внутренний артикул ФФ'] == ff_sku:
-                # Ищем карточку в базе API и забираем ручной остаток, проставленный менеджером
                 for card in st.session_state.api_pulled_cards:
                     if card['Магазин'] == rule['Магазин'] and card['Артикул продавца'] == rule['Артикул продавца']:
                         mp_stock = card.get('Ручной остаток FBS на МП', 0)
@@ -153,13 +160,14 @@ with tab_stocks:
         
         channels_str = ", \n".join(connected_channels_list) if connected_channels_list else "⚠️ Нет привязанных витрин"
         
+        # Расчет кубатуры на базе РЕАЛЬНЫХ размеров, зафиксированных вручную при приемке
         unit_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
         total_sku_m3 = unit_m3 * phys_stock_on_shelves
         total_warehouse_m3 += total_sku_m3
         
         rows_unified.append({
-            "Внутренний Код ФФ": ff_sku, "Описание товара": data['name'], "Габариты упаковки": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
-            "📦 НА ВАШИХ ПОЛКАХ (ФИЗ, шт)": phys_stock_on_shelves, "Сумма остатков FBS на всех МП": total_live_fbs_on_marketplaces, "Остаток на FBO маркетплейсов": data['fbo_allocated'], "Детализация витрин (Ручной ввод менеджера)": channels_str
+            "Внутренний Код ФФ": ff_sku, "Описание товара": data['name'], "Габариты упаковки (ЗАМЕР СКЛАДА)": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
+            "📦 НА ВАШИХ ПОЛКАХ (ФИЗ, шт)": phys_stock_on_shelves, "Текущие ручные FBS на МП (всего)": total_live_fbs_on_marketplaces, "Остаток на FBO маркетплейсов": data['fbo_allocated'], "Детализация витрин (Ввод менеджера на МП)": channels_str
         })
         
     df_unified_matrix = pd.DataFrame(rows_unified)
@@ -181,7 +189,7 @@ with tab_billing:
         st.success(f"Период расчета: **{days_in_period} дн.**")
     with col_b2:
         st.write("##")
-        df_excel_ready = df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "📦 НА ВАШИХ ПОЛКАХ (ФИЗ, шт)"]].copy()
+        df_excel_ready = df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "📦 НА ВАШИХ ПОЛКАХ (ФИЗ, шт)", "Габариты упаковки (ЗАМЕР СКЛАДА)"]].copy()
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer: df_excel_ready.to_excel(writer, index=False)
         st.download_button(label="📥 Скачать сводный отчет в Excel", data=buffer.getvalue(), file_name="wms_3pl_billing.xlsx", use_container_width=True)
@@ -197,7 +205,7 @@ with tab_billing:
         total_pcs_received_period = df_receipt_filtered['Принято штук'].sum()
         total_receipt_billing_period = df_receipt_filtered['Итого за накладную'].sum()
         st.write("---")
-        st.subheader("📋 Operational journal")
+        st.subheader("📋 Операционный журнал приходов (Логистика за период)")
         df_receipt_disp = df_receipt_filtered.copy()
         df_receipt_disp['Дата операции'] = df_receipt_disp['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
         st.dataframe(df_receipt_disp, use_container_width=True, hide_index=True)
