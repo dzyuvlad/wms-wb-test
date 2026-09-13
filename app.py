@@ -16,7 +16,6 @@ if 'wms_ff_inventory' not in st.session_state:
 if 'wms_mapping_rules' not in st.session_state:
     st.session_state.wms_mapping_rules = []
 
-# Расширенная база карточек маркетплейсов (имитирует живые остатки FBS и FBO из API)
 if 'api_pulled_cards' not in st.session_state:
     st.session_state.api_pulled_cards = [
         {"Магазин": "Wildberries (Кабинет 1)", "Артикул продавца": "001", "Название на витрине": "Сушилка обувная электрическая", "Баркод": "4607123456011", "Ручной остаток FBS на МП": 15, "Актуальный сток FBO на МП": 45},
@@ -189,17 +188,6 @@ with tab_stocks:
     unique_shops_for_matrix = list(set([c['Магазин'] for c in st.session_state.api_pulled_cards]))
     selected_shop_view = st.selectbox("🌐 Выберите Личный Кабинет для просмотра складских остатков:", ["Показать все магазины списком"] + unique_shops_for_matrix, key="matrix_shop_filter")
     
-    st.markdown("### 💰 Помагазинная сетка тарифов за сборку FBS")
-    col_rates_dynamic = st.columns(len(st.session_state.api_pulled_cards))
-    for index, card in enumerate(st.session_state.api_pulled_cards):
-        with col_rates_dynamic[index]:
-            rate_key = f"{card['Магазин']}___{card['Артикул продавца']}"
-            current_custom_rate = st.session_state.wms_fbs_custom_rates.get(rate_key, st.session_state.default_fbs_rate)
-            new_fbs_rate = st.number_input(f"{card['Артикул продавца']}\n({card['Магазин']})", min_value=0.0, value=float(current_custom_rate), step=5.0, key=f"fbs_input_{rate_key}")
-            if new_fbs_rate != current_custom_rate:
-                st.session_state.wms_fbs_custom_rates[rate_key] = new_fbs_rate
-                st.rerun()
-                
     st.write("---")
     st.markdown("### 📋 Оперативный баланс Единого Стока")
     
@@ -217,7 +205,6 @@ with tab_stocks:
         
         for rule in st.session_state.wms_mapping_rules:
             if rule['Внутренний артикул ФФ'] == ff_sku:
-                # Если включен фильтр по магазину — проверяем связку
                 if selected_shop_view != "Показать все магазины списком" and rule['Магазин'] == selected_shop_view:
                     is_sku_linked_to_selected_shop = True
                 elif selected_shop_view == "Показать все магазины списком":
@@ -226,7 +213,7 @@ with tab_stocks:
                 for card in st.session_state.api_pulled_cards:
                     if card['Магазин'] == rule['Магазин'] and card['Артикул продавца'] == rule['Артикул продавца']:
                         mp_fbs_stock = int(card.get('Ручной остаток FBS на МП', 0)) 
-                        mp_fbo_stock = int(card.get('Актуальный сток FBO на МП', 0)) # Считывание FBO из API
+                        mp_fbo_stock = int(card.get('Актуальный сток FBO на МП', 0)) 
                         
                         total_live_fbs_on_marketplaces += mp_fbs_stock
                         total_live_fbo_on_marketplaces += mp_fbo_stock
@@ -241,7 +228,6 @@ with tab_stocks:
                             
                         connected_channels_list.append(f"SKU: {rule['Артикул продавца']} | {rule['Магазин']} (FBS: {mp_fbs_stock} шт. | FBO: {mp_fbo_stock} шт.)")
         
-        # Если включен фильтр по конкретному магазину, и этот товар к нему не привязан — скрываем строку
         if selected_shop_view != "Показать все магазины списком" and not is_sku_linked_to_selected_shop:
             continue
             
@@ -255,7 +241,6 @@ with tab_stocks:
         channels_str = ", \n".join(connected_channels_list) if connected_channels_list else "⚠️ Нет привязанных витрин"
         current_sku_rate = data.get('piece_rate', st.session_state.default_piece_rate)
         
-        # НАГЛЯДНОЕ РАЗДЕЛЕНИЕ СТОКОВ (ФФ, FBS, FBO) НА ЭКРАНЕ
         rows_unified.append({
             "Внутренний Код ФФ": ff_sku, 
             "Описание товара": data['name'], 
@@ -348,7 +333,7 @@ with tab_billing:
 
     paid_already_amount = 0.0
     for paid_act in st.session_state.wms_payment_ledger:
-        if selected_client_filter == "Все подключенные кабинеты разом" or paid_act['Клиент'] == "ALL" or paid_act['Клиент'] == selected_client_filter:
+        if selected_client_filter == "Все подключенные кабинеты разом" or paid_act['Clean'] == "ALL" or paid_act['Клиент'] == selected_client_filter:
             if paid_act['Старт'] <= st.session_state.start_period <= paid_act['Конец'] and paid_act['Старт'] <= st.session_state.end_period <= paid_act['Конец']:
                 paid_already_amount = raw_dirty_total_period
 
@@ -371,16 +356,43 @@ with tab_billing:
         if net_unpaid_balance_period > 0: st.metric("🔴 ОСТАТОК К ОПЛАТЕ (НЕОПЛАЧЕННЫЙ ДОЛГ)", f"{net_unpaid_balance_period:.2f} ₽")
         else: st.metric("🟢 СТАТУС ПЕРИОДА", "ПОЛНОСТЬЮ ОПЛАЧЕН")
 with tab_rates:
-    st.subheader("💰 Управление глобальными базовыми тарифами склада")
+    st.subheader("💰 Управление тарифами склада и покабинетная сетка")
+    
+    st.markdown("### 1. Персональная сетка тарифов за сборку FBS")
+    st.write("Настройте индивидуальную стоимость обработки 1 заказа для каждого личного кабинета селлера:")
+    
+    # ПЕРЕНЕСЕНО СЮДА: Сетка выставляется один раз в тарифах для порядка в интерфейсе
+    col_rates_dynamic = st.columns(len(st.session_state.api_pulled_cards))
+    for index, card in enumerate(st.session_state.api_pulled_cards):
+        with col_rates_dynamic[index]:
+            rate_key = f"{card['Магазин']}___{card['Артикул продавца']}"
+            current_custom_rate = st.session_state.wms_fbs_custom_rates.get(rate_key, st.session_state.default_fbs_rate)
+            
+            # Поле ввода индивидуального прайса за заказ по маркетплейсу
+            new_fbs_rate = st.number_input(
+                f"Тариф FBS (₽/заказ):\n{card['Артикул продавца']} [{card['Магазин']}]", 
+                min_value=0.0, 
+                value=float(current_custom_rate), 
+                step=5.0, 
+                key=f"rates_tab_fbs_{rate_key}"
+            )
+            if new_fbs_rate != current_custom_rate:
+                st.session_state.wms_fbs_custom_rates[rate_key] = new_fbs_rate
+                st.rerun()
+                
+    st.write("---")
+    st.markdown("### 2. Базовые глобальные ставки (подсказки для системы)")
     st.session_state.m3_rate = st.number_input("Стоимость хранения 1 м³ груза в сутки (₽):", min_value=0.0, value=float(st.session_state.m3_rate), step=1.0)
-    st.session_state.default_fbs_rate = st.number_input("Базовая стоимость сборки одного заказа FBS по умолчанию (₽):", min_value=0.0, value=float(st.session_state.default_fbs_rate), step=1.0)
+    st.session_state.default_fbs_rate = st.number_input("Базовая сборка одного заказа FBS по умолчанию (₽):", min_value=0.0, value=float(st.session_state.default_fbs_rate), step=1.0)
     st.session_state.default_piece_rate = st.number_input("Базовый тариф обработки за 1 шт по умолчанию (₽):", min_value=0.0, value=float(st.session_state.default_piece_rate), step=0.5)
 
 with tab_api:
     st.subheader("🔑 Панель авторизации личных кабинетов маркетплейсов")
+    st.markdown("**Введите ключи интеграции API (4 магазина селлера)**")
     input_wb = st.text_input("Введите API Токен WB (тип 'Контент'):", type="password", value=st.session_state.wb_token_saved)
     input_oz_id = st.text_input("Введите Ozon Client-ID:", value=st.session_state.ozon_id_saved)
     input_oz_key = st.text_input("Введите Ozon API Key:", type="password", value=st.session_state.ozon_key_saved)
+    
     if st.button("💾 Активировать интеграцию по API", use_container_width=True):
         st.session_state.wb_token_saved = input_wb
         st.session_state.ozon_id_saved = input_oz_id
