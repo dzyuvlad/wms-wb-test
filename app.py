@@ -4,17 +4,22 @@ import datetime
 import io
 
 # Настройка страницы WMS
-st.set_page_config(page_title="WMS Гибкие Тарифы OMS", layout="wide", page_icon="📦")
+st.set_page_config(page_title="WMS Единый Сток OMS", layout="wide", page_icon="📦")
 
 st.title("WMS")
 st.write(f"Последняя синхронизация баз данных: `{datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}`")
 
 # --- ПОЛНОЕ ОБНУЛЕНИЕ ВСЕХ БАЗ ДАННЫХ ДЛЯ ЧИСТОГО ТЕСТА С НУЛЯ ---
-if 'wms_ff_inventory' not in st.session_state:
-    st.session_state.wms_ff_inventory = {}
+if 'wms_ff_inventory' not in st.session_state: st.session_state.wms_ff_inventory = {}
+if 'wms_mapping_rules' not in st.session_state: st.session_state.wms_mapping_rules = []
+if 'wms_fbs_custom_rates' not in st.session_state: st.session_state.wms_fbs_custom_rates = {}
+if 'wms_storage_custom_rates' not in st.session_state: st.session_state.wms_storage_custom_rates = {}
+if 'wms_receipt_history' not in st.session_state: st.session_state.wms_receipt_history = []
+if 'wms_payment_ledger' not in st.session_state: st.session_state.wms_payment_ledger = [] 
 
-if 'wms_mapping_rules' not in st.session_state:
-    st.session_state.wms_mapping_rules = []
+# --- НОВАЯ БАЗА: Группировка магазинов под Единых Клиентов (Юрлица) ---
+if 'wms_client_groups' not in st.session_state:
+    st.session_state.wms_client_groups = {} # Ключ: Имя Клиента, Значение: список магазинов
 
 if 'api_pulled_cards' not in st.session_state:
     st.session_state.api_pulled_cards = [
@@ -24,40 +29,18 @@ if 'api_pulled_cards' not in st.session_state:
         {"Магазин": "Ozon (Кабинет 2)", "Артикул продавца": "OZ-DRY-CLEAN", "Название на витрине": "Сушилка + дезинфектор", "Баркод": "4607123456044", "Ручной остаток FBS на МП": 5, "Актуальный сток FBO на МП": 12},
     ]
 
-# Намертво фиксированные хранилища тарифов
-if 'wms_fbs_custom_rates' not in st.session_state:
-    st.session_state.wms_fbs_custom_rates = {}
-
-if 'wms_storage_custom_rates' not in st.session_state:
-    st.session_state.wms_storage_custom_rates = {}
-
 today_date = datetime.date.today()
-
-if 'wms_receipt_history' not in st.session_state:
-    st.session_state.wms_receipt_history = []
-
-if 'wms_payment_ledger' not in st.session_state:
-    st.session_state.wms_payment_ledger = [] 
-
-# Внутренние технические дефолты
 if 'm3_rate' not in st.session_state: st.session_state.m3_rate = 50.0
 if 'default_fbs_rate' not in st.session_state: st.session_state.default_fbs_rate = 35.0  
 if 'default_piece_rate' not in st.session_state: st.session_state.default_piece_rate = 5.0
-
 if 'wb_token_saved' not in st.session_state: st.session_state.wb_token_saved = ''
 if 'ozon_id_saved' not in st.session_state: st.session_state.ozon_id_saved = ''
 if 'ozon_key_saved' not in st.session_state: st.session_state.ozon_key_saved = ''
-
 if 'start_period' not in st.session_state: st.session_state.start_period = today_date - datetime.timedelta(days=6)
 if 'end_period' not in st.session_state: st.session_state.end_period = today_date
 
-# --- СТРУКТУРА ИЗ 5 ИЗОЛИРОВАННЫХ ВКЛАДОК ---
 tab_receive, tab_stocks, tab_billing, tab_rates, tab_api = st.tabs([
-    "📥 Приемка на баланс ФФ", 
-    "📊 Текущие Остатки (Матрица)", 
-    "📅 Счета и 3PL-Биллинг", 
-    "💰 Управление Тарифами Склада",
-    "🔑 Подключение Ключей API"
+    "📥 Приемка на баланс ФФ", "📊 Текущие Остатки (Матрица)", "📅 Счета и 3PL-Биллинг", "💰 Управление Тарифами Склада", "🔑 Подключение Ключей API"
 ])
 with tab_receive:
     st.subheader("📥 Шаг 1: Выберите товар склада (или зарегистрируйте новый)")
@@ -150,10 +133,10 @@ with tab_receive:
 
     if st.session_state.get('show_confirmation_modal', False):
         st.markdown("---")
-        st.markdown("### ⚠️ ПОДТВЕРЖДЕНИЕ ПРИЕМКИ")
+        st.markdown("### ⚠️ ПОДТВЕРЖДЕНИЕ ПРИЕМКИ: Проверьте данные перед записью в систему!")
         col_m1, col_m2 = st.columns(2)
         with col_m1:
-            st.markdown(f"📂 **Физические параметры:**\n* Код: `{target_ff_sku}` | Описание: **{ff_name}**\n* Коробки: `{input_boxes}`\n## ИТОГО: **{calculated_total_pcs} шт.**")
+            st.markdown(f"📂 **Физические параметры партии:**\n* Внутренний код: `{target_ff_sku}`\n* Описание: **{ff_name}**\n* Коробки: `{input_boxes}`\n## ИТОГО: **{calculated_total_pcs} шт.**")
         with col_m2:
             if selected_labels:
                 for lbl in selected_labels: st.markdown(f"* `{lbl}`")
@@ -167,8 +150,7 @@ with tab_receive:
                 st.session_state.wms_ff_inventory[target_ff_sku] = {
                     'name': ff_name, 'length_cm': c_l, 'width_cm': c_w, 'height_cm': c_h, 'piece_rate': sku_piece_rate,
                     'boxes': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('boxes', 0) + input_boxes,
-                    'physical_stock': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('physical_stock', 0) + calculated_total_pcs, 'fbo_allocated': 20, # Симулируем, что 20 шт уехало на FBO
-                    'fbo_departure_date': current_time_stamp.date() + datetime.timedelta(days=4) # Уехало на FBO через 4 дня после приемки
+                    'physical_stock': st.session_state.wms_ff_inventory.get(target_ff_sku, {}).get('physical_stock', 0) + calculated_total_pcs, 'fbo_allocated': 0
                 }
                 st.session_state.wms_mapping_rules = [r for r in st.session_state.wms_mapping_rules if r['Внутренний артикул ФФ'] != target_ff_sku]
                 for label in selected_labels:
@@ -189,11 +171,16 @@ with tab_receive:
 with tab_stocks:
     st.subheader("📊 Оперативная мультиканальная матрица Единого Стока")
     
-    unique_shops_for_matrix = list(set([c['Магазин'] for c in st.session_state.api_pulled_cards]))
-    selected_shop_view = st.selectbox("🌐 Выберите Личный Кабинет для просмотра складских остатков:", ["Показать все магазины списком"] + unique_shops_for_matrix, key="matrix_shop_filter")
+    # Сбор списка созданных групп клиентов для фильтрации матрицы
+    available_client_groups = list(st.session_state.wms_client_groups.keys())
+    selected_client_group_view = st.selectbox(
+        "🌐 Выберите Клиента (Группу магазинов) для просмотра остатков:", 
+        ["Показать сквозной список всех товаров склада"] + available_client_groups, 
+        key="matrix_group_filter"
+    )
     
     st.write("---")
-    st.markdown("### 📋 Оперативный баланс Единого Стока")
+    st.markdown("### 📋 Баланс Единого Стока")
     
     rows_unified = []
     total_warehouse_m3 = 0.0
@@ -201,18 +188,22 @@ with tab_stocks:
     total_fbs_processing_cost_global = 0.0 
     fbs_cost_by_shop = {c['Магазин']: 0.0 for c in st.session_state.api_pulled_cards}
     
+    # Определяем, какие технические ЛК мы должны показывать исходя из выбранного клиента
+    if selected_client_group_view != "Показать сквозной список всех товаров склада":
+        allowed_shops_in_view = st.session_state.wms_client_groups[selected_client_group_view]
+    else:
+        allowed_shops_in_view = [c['Магазин'] for c in st.session_state.api_pulled_cards]
+        
     for ff_sku, data in st.session_state.wms_ff_inventory.items():
         total_live_fbs_on_marketplaces = 0
         total_live_fbo_on_marketplaces = 0
         connected_channels_list = []
-        is_sku_linked_to_selected_shop = False
+        is_sku_linked_to_current_view = False
         
         for rule in st.session_state.wms_mapping_rules:
             if rule['Внутренний артикул ФФ'] == ff_sku:
-                if selected_shop_view != "Показать все магазины списком" and rule['Магазин'] == selected_shop_view:
-                    is_sku_linked_to_selected_shop = True
-                elif selected_shop_view == "Показать все магазины списком":
-                    is_sku_linked_to_selected_shop = True
+                if rule['Магазин'] in allowed_shops_in_view:
+                    is_sku_linked_to_current_view = True
                     
                 for card in st.session_state.api_pulled_cards:
                     if card['Магазин'] == rule['Магазин'] and card['Артикул продавца'] == rule['Артикул продавца']:
@@ -232,7 +223,7 @@ with tab_stocks:
                             
                         connected_channels_list.append(f"SKU: {rule['Артикул продавца']} | {rule['Магазин']} (FBS: {mp_fbs_stock} шт. | FBO: {mp_fbo_stock} шт.)")
         
-        if selected_shop_view != "Показать все магазины списком" and not is_sku_linked_to_selected_shop:
+        if not is_sku_linked_to_current_view and selected_client_group_view != "Показать сквозной список всех товаров склада":
             continue
             
         phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders_count)
@@ -246,14 +237,8 @@ with tab_stocks:
         current_sku_rate = data.get('piece_rate', st.session_state.default_piece_rate)
         
         rows_unified.append({
-            "Внутренний Код ФФ": ff_sku, 
-            "Описание товара": data['name'], 
-            "Габариты (ЗАМЕР СКЛАДА)": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
-            "📦 На складе ФФ (Платное хранение, шт)": phys_stock_on_shelves, 
-            "Текущий FBS на МП (шт)": total_live_fbs_on_marketplaces, 
-            "Сток FBO на МП (Актуально, шт)": total_live_fbo_on_marketplaces, 
-            "Тариф обработки (₽/шт)": f"{current_sku_rate:.2f} ₽", 
-            "Детализация связанных витрин селлера": channels_str
+            "Внутренний Код ФФ": ff_sku, "Описание товара": data['name'], "Габариты (ЗАМЕР СКЛАДА)": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
+            "📦 На складе ФФ (Платное хранение, шт)": phys_stock_on_shelves, "Текущий FBS на МП (шт)": total_live_fbs_on_marketplaces, "Сток FBO на МП (Актуально, шт)": total_live_fbo_on_marketplaces, "Тариф обработки (₽/шт)": f"{current_sku_rate:.2f} ₽", "Детализация связанных витрин селлера": channels_str
         })
         
     if rows_unified:
@@ -265,12 +250,12 @@ with tab_stocks:
         st.write("---")
         st.dataframe(df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "Габариты (ЗАМЕР СКЛАДА)", "📦 На складе ФФ (Платное хранение, шт)", "Текущий FBS на МП (шт)", "Сток FBO на МП (Актуально, шт)", "Тариф обработки (₽/шт)", "Детализация связанных витрин селлера"]], use_container_width=True, hide_index=True)
     else: 
-        st.info("👋 В выбранном личном кабинете нет активных остатков на складе.")
+        st.info("👋 В этой группе клиентов пока нет остатков. Примите товар на баланс или создайте группу на вкладке тарифов.")
 with tab_billing:
     st.subheader("📅 Учет дебиторской задолженности и закрытие актов оплат")
     
-    unique_shops_list = list(set([c['Магазин'] for c in st.session_state.api_pulled_cards]))
-    selected_client_filter = st.selectbox("🌐 Фильтрация отчетов по конкретному клиенту (Личному кабинету):", ["Все подключенные кабинеты разом"] + unique_shops_list)
+    # Срез счетов перестроен на Единые Группы Клиентов (Юрлица)
+    selected_client_filter = st.selectbox("🌐 Фильтрация отчетов по Клиенту (Группе ЛК):", ["Все клиенты разом"] + available_client_groups)
     
     col_b1, col_b2 = st.columns(2)
     with col_b1:
@@ -280,88 +265,92 @@ with tab_billing:
         st.info(f"📆 Выбранный период: **{st.session_state.start_period.strftime('%d.%m.%Y')} — {st.session_state.end_period.strftime('%d.%m.%Y')}** ({days_in_period} дн.)")
     
     with col_b2:
-        st.markdown("**💳 Панель закрытия платежей (Менеджер 3PL)**")
-        st.write("Вы можете отметить текущий выбранный интервал как полностью оплаченный селлером:")
-        
-        if st.button("💳 Отметить этот период как ОПЛАЧЕННЫЙ для выбранного кабинета", use_container_width=True):
-            target_ledger_client = "ALL" if selected_client_filter == "Все подключенные кабинеты разом" else selected_client_filter
+        st.markdown("**💳 Панель закрытия платежей (CRM 3PL)**")
+        if st.button("💳 Отметить этот период как ОПЛАЧЕННЫЙ для выбранного клиента", use_container_width=True):
+            target_ledger_client = "ALL" if selected_client_filter == "Все клиенты разом" else selected_client_filter
             st.session_state.wms_payment_ledger.append({
                 "Клиент": target_ledger_client, "Старт": st.session_state.start_period, "Конец": st.session_state.end_period
             })
             st.success(f"Акт оплаты успешно проведен!")
             st.rerun()
-            
         if st.button("🔄 Сбросить всю историю закрытых оплат", use_container_width=True):
             st.session_state.wms_payment_ledger = []
             st.success("История платежей полностью очищена!")
             st.rerun()
 
+    # Фильтрация операционного журнала накладных под Единого Клиента
     df_receipt_history = pd.DataFrame(st.session_state.wms_receipt_history) if st.session_state.wms_receipt_history else pd.DataFrame(columns=["Дата операции", "Время приемки", "Внутренний Артикул ФФ", "Разгружено коробов (шт)", "Принято товара (шт)", "Ставка за шт", "Сумма за разгрузку", "Сумма за обработку", "Итого за накладную", "Зафиксированный тариф разгрузки"])
     total_boxes_unloaded_period, total_receipt_billing_period, calculated_unload_billing = 0, 0.0, 0.0
-    
     df_receipt_filtered = pd.DataFrame()
+    
     if not df_receipt_history.empty:
         df_receipt_filtered = df_receipt_history[(df_receipt_history['Дата операции'] >= st.session_state.start_period) & (df_receipt_history['Дата операции'] <= st.session_state.end_period)]
-        if selected_client_filter != "Все подключенные кабинеты разом":
-            allowed_ff_skus_for_client = [r['Внутренний артикул ФФ'] for r in st.session_state.wms_mapping_rules if r['Магазин'] == selected_client_filter]
+        if selected_client_filter != "Все клиенты разом":
+            shops_in_group = st.session_state.wms_client_groups[selected_client_filter]
+            allowed_ff_skus_for_client = [r['Внутренний артикул ФФ'] for r in st.session_state.wms_mapping_rules if r['Магазин'] in shops_in_group]
             df_receipt_filtered = df_receipt_filtered[df_receipt_filtered['Внутренний Артикул ФФ'].isin(allowed_ff_skus_for_client)]
             
         if not df_receipt_filtered.empty:
             total_boxes_unloaded_period = df_receipt_filtered['Разгружено коробов (шт)'].sum()
             total_receipt_billing_period = df_receipt_filtered['Итого за накладную'].sum()
             calculated_unload_billing = df_receipt_filtered['Сумма за разгрузку'].sum()
-            
             st.write("---")
             st.subheader("📋 Срез операционного журнала приходов")
             df_receipt_disp = df_receipt_filtered.copy()
             df_receipt_disp['Дата операции'] = df_receipt_disp['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
             st.dataframe(df_receipt_disp, use_container_width=True, hide_index=True)
 
+    # ПОСУТОЧНЫЙ ПОКАБИНЕТНЫЙ ОБСЧЕТ С УЧЕТОМ ГРУППЫ КЛИЕНТА
     total_storage_cost_period = 0.0
     active_storage_m3_pool = 0.0
+    active_fbs_pool = 0.0
     calendar_days_set = set(st.session_state.start_period + datetime.timedelta(days=x) for x in range(days_in_period))
     
+    # Фильтруем список магазинов, по которым бежит цикл начислений
+    target_groups_loop = [selected_client_filter] if selected_client_filter != "Все клиенты разом" else available_client_groups
+    
     for current_day in calendar_days_set:
-        for ff_sku, data in st.session_state.wms_ff_inventory.items():
-            receipt_dates = [h['Дата операции'] for h in st.session_state.wms_receipt_history if h['Внутренний Артикул ФФ'] == ff_sku]
-            if not receipt_dates: continue
-            first_receipt_date = min(receipt_dates)
+        for client_name in target_groups_loop:
+            shops_in_group = st.session_state.wms_client_groups[client_name]
             
-            if current_day <= first_receipt_date: continue
-            simulated_outbound_date = datetime.date(2026, 9, 5)
-            if current_day > simulated_outbound_date: continue
+            for ff_sku, data in st.session_state.wms_ff_inventory.items():
+                receipt_dates = [h['Дата операции'] for h in st.session_state.wms_receipt_history if h['Внутренний Артикул ФФ'] == ff_sku]
+                if not receipt_dates: continue
+                if current_day <= min(receipt_dates): continue # День приемки = 0 ₽
+                if current_day > datetime.date(2026, 9, 5): continue # Учет выбытия
+                
+                total_live_fbs_on_marketplaces = 0
+                is_sku_linked_to_client = False
+                
+                for rule in st.session_state.wms_mapping_rules:
+                    if rule['Внутренний артикул ФФ'] == ff_sku and rule['Магазин'] in shops_in_group:
+                        is_sku_linked_to_client = True
+                        for card in st.session_state.api_pulled_cards:
+                            if card['Магазин'] == rule['Магазин'] and card['Артикул продавца'] == rule['Артикул продавца']:
+                                total_live_fbs_on_marketplaces += int(card.get('Ручной остаток FBS на МП', 0))
+                                
+                if not is_sku_linked_to_client: continue
+                
+                phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders_count)
+                total_pcs = phys_stock_on_shelves + total_live_fbs_on_marketplaces
+                u_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
+                day_sku_m3 = u_m3 * total_pcs
+                active_storage_m3_pool += (day_sku_m3 / days_in_period)
+                
+                # Подставляем персональный тариф за куб, привязанный к конкретной группе/магазину
+                first_linked_shop = [r['Магазин'] for r in st.session_state.wms_mapping_rules if r['Внутренний артикул ФФ'] == ff_sku and r['Магазин'] in shops_in_group][0]
+                shop_storage_rate = st.session_state.wms_storage_custom_rates.get(first_linked_shop, st.session_state.m3_rate)
+                total_storage_cost_period += (day_sku_m3 * shop_storage_rate)
 
-            total_live_fbs_on_marketplaces = 0
-            is_sku_linked_to_selected_shop = False
-            for rule in st.session_state.wms_mapping_rules:
-                if rule['Внутренний артикул ФФ'] == ff_sku:
-                    if selected_client_filter != "Все подключенные кабинеты разом" and rule['Магазин'] == selected_client_filter: is_sku_linked_to_selected_shop = True
-                    elif selected_client_filter == "Все подключенные кабинеты разом": is_sku_linked_to_selected_shop = True
-                    for card in st.session_state.api_pulled_cards:
-                        if card['Магазин'] == rule['Магазин'] and card['Артикул продавца'] == rule['Артикул продавца']:
-                            total_live_fbs_on_marketplaces += int(card.get('Ручной остаток FBS на МП', 0))
-
-            if selected_client_filter != "Все подключенные кабинеты разом" and not is_sku_linked_to_selected_shop: continue
-
-            phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders_count)
-            total_pcs = phys_stock_on_shelves + total_live_fbs_on_marketplaces
-            u_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
-            day_sku_m3 = u_m3 * total_pcs
-            active_storage_m3_pool += (day_sku_m3 / days_in_period)
-            
-            if selected_client_filter != "Все подключенные кабинеты разом":
-                shop_storage_rate = st.session_state.wms_storage_custom_rates.get(selected_client_filter, st.session_state.m3_rate)
-            else:
-                linked_shops_for_sku = [r['Магазин'] for r in st.session_state.wms_mapping_rules if r['Внутренний артикул ФФ'] == ff_sku]
-                active_shop = linked_shops_for_sku[0] if linked_shops_for_sku else "DEFAULT"
-                shop_storage_rate = st.session_state.wms_storage_custom_rates.get(active_shop, st.session_state.m3_rate)
-            total_storage_cost_period += (day_sku_m3 * shop_storage_rate)
-    active_fbs_pool = fbs_cost_by_shop.get(selected_client_filter, 0.0) if selected_client_filter != "Все подключенные кабинеты разом" else total_fbs_processing_cost_global
+    # Подсчет сборки FBS по магазинам группы
+    for client_name in target_groups_loop:
+        for shop in st.session_state.wms_client_groups[client_name]:
+            active_fbs_pool += fbs_cost_by_shop.get(shop, 0.0)
     raw_dirty_total_period = total_storage_cost_period + total_receipt_billing_period + active_fbs_pool
 
     paid_already_amount = 0.0
     for paid_act in st.session_state.wms_payment_ledger:
-        if selected_client_filter == "Все подключенные кабинеты разом" or paid_act['Клиент'] == "ALL" or paid_act['Клиент'] == selected_client_filter:
+        if selected_client_filter == "Все клиенты разом" or paid_act['Клиент'] == "ALL" or paid_act['Клиент'] == selected_client_filter:
             if paid_act['Старт'] <= st.session_state.start_period <= paid_act['Конец'] and paid_act['Старт'] <= st.session_state.end_period <= paid_act['Конец']:
                 paid_already_amount = raw_dirty_total_period
 
@@ -369,71 +358,76 @@ with tab_billing:
 
     st.write("---")
     st.subheader("🧾 Детализированный 3PL-акт начислений")
-    display_rate_label = f"Персональная по ЛК" if selected_client_filter == "Все подключенные кабинеты разом" else f"{st.session_state.wms_storage_custom_rates.get(selected_client_filter, st.session_state.m3_rate):.2f} ₽ за 1 м³ / сутки"
-    
     billing_period_data = [
-        {"Услуга фулфилмента": "Ответственное хранение объема груза (Со следующего дня после приемки)", "База расчета": f"{active_storage_m3_pool:.4f} м³ средн. за период", "Тарифная ставка": display_rate_label, "Итого начислено (₽)": f"{total_storage_cost_period:.2f} ₽"},
-        {"Услуга фулфилмента": "Сборка, упаковка и маркировка заказов по FBS", "База расчета": "По фактическим заказам ЛК", "Тарифная ставка": "Персональная покабинетная", "Итого начислено (₽)": f"{active_fbs_pool:.2f} ₽"},
-        {"Услуга фулфилмента": "Физическая разгрузка коробов (Динамическая)", "База расчета": f"{total_boxes_unloaded_period} кор. принято", "Тарифная ставка": "Из актов приходов", "Итого начислено (₽)": f"{calculated_unload_billing:.2f} ₽"},
+        {"Услуга фулфилмента": "Ответственное хранение объема груза на полках", "База расчета": f"{active_storage_m3_pool:.4f} м³ средн. за период", "Тарифная ставка": "Персональная покабинетная", "Итого начислено (₽)": f"{total_storage_cost_period:.2f} ₽"},
+        {"Услуга фулфилмента": "Сборка, упаковка и маркировка заказов по FBS", "База расчета": "По фактическим заказам ЛК группы", "Тарифная ставка": "Индивидуальная по ЛК", "Итого начислено (₽)": f"{active_fbs_pool:.2f} ₽"},
+        {"Услуга фулфилмента": "Физическая разгрузка прибывших коробов (Динамическая)", "База расчета": f"{total_boxes_unloaded_period} кор.", "Тарифная ставка": "Из актов приходов", "Итого начислено (₽)": f"{calculated_unload_billing:.2f} ₽"},
         {"Услуга фулфилмента": "Поартикульная обработка и пересчет груза", "База расчета": "Штуки из актов", "Тарифная ставка": "Индивидуальная по SKU", "Итого начислено (₽)": f"{(total_receipt_billing_period - calculated_unload_billing):.2f} ₽"}
     ]
     st.table(pd.DataFrame(billing_period_data))
     
     col_metric1, col_metric2, col_metric3 = st.columns(3)
     with col_metric1: st.metric("Всего начислено за срок", f"{raw_dirty_total_period:.2f} ₽")
-    with col_metric2: st.metric("Уже оплачено клиентом", f"{paid_already_amount:.2f} ₽", delta_color="inverse")
+    with col_metric2: st.metric("Уже оплачено клиентом (Из Ledger-базы)", f"{paid_already_amount:.2f} ₽", delta_color="inverse")
     with col_metric3:
-        if net_unpaid_balance_period > 0: st.metric("🔴 ОСТАТОК К ОПЛАТЕ (НЕОПЛАЧЕННЫЙ ДОЛГ)", f"{net_unpaid_balance_period:.2f} ₽")
-        else: st.metric("🟢 СТАТУС ПЕРИОДА", "ПОЛНОСТЬЮ ОПЛАЧЕН")
+        if net_unpaid_balance_period > 0: st.metric("🔴 ОСТАТОК К ОПЛАТЕ (НЕОПЛАЧЕННЫЙ ДОЛГ КЛИЕНТА)", f"{net_unpaid_balance_period:.2f} ₽")
+        else: st.metric("🟢 СТАТУС ПЕРИОДА КЛИЕНТА", "ПОЛНОСТЬЮ ОПЛАЧЕН")
 with tab_rates:
-    st.subheader("💰 Управление тарифами склада и покабинетная сетка")
-    st.info("💡 **Железная фиксация цен:** Все внесенные ниже изменения тарифов мгновенно сохраняются и будут действовать до тех пор, пока вы не скорректируете их вручную.")
+    st.subheader("💰 Управление тарифами и группами клиентов фулфилмента")
     
+    # --- НОВЫЙ ИНСТРУМЕНТ: СОЗДАНИЕ И ОБЪЕДИНЕНИЕ КАБИНЕТОВ В ЕДИНОЕ ЮРЛИЦО ---
+    st.markdown("### 🏢 Блок объединения кабинетов маркетплейсов в Группы Клиентов")
+    st.write("Создайте единое имя клиента и привяжите к нему технические личные кабинеты маркетплейсов:")
+    
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
+        new_group_name = st.text_input("Введите имя Единого Клиента / Название Юрлица:", value="ИП Иванов (Бренд Сушилки)")
+    with col_g2:
+        all_tech_shops = [c['Магазин'] for c in st.session_state.api_pulled_cards]
+        selected_shops_for_group = st.multiselect("Выберите магазины, входящие в это юрлицо:", all_tech_shops)
+        
+    if st.button("➕ Создать / Обновить Группу Клиента", use_container_width=True):
+        if not new_group_name.strip(): st.error("❌ Имя клиента не может быть пустым!")
+        elif not selected_shops_for_group: st.error("❌ Выберите хотя бы один технический магазин!")
+        else:
+            st.session_state.wms_client_groups[new_group_name] = selected_shops_for_group
+            st.success(f"Клиент '{new_group_name}' успешно зарегистрирован в OMS! Магазины объединены.")
+            st.rerun()
+            
+    if st.session_state.wms_client_groups:
+        st.write("📂 **Действующие объединенные Клиенты фулфилмента:**")
+        st.write(st.session_state.wms_client_groups)
+        
+    st.write("---")
     st.markdown("### 🏬 1. Помагазинный тариф ответственного хранения")
-    st.write("Задайте индивидуальную стоимость хранения 1 кубического метра груза в сутки (₽) для каждого кабинета:")
-    
     col_storage_dynamic = st.columns(len(st.session_state.api_pulled_cards))
     for index, card in enumerate(st.session_state.api_pulled_cards):
         with col_storage_dynamic[index]:
             shop_key = card['Магазин']
             current_storage_rate = st.session_state.wms_storage_custom_rates.get(shop_key, st.session_state.m3_rate)
-            
-            new_storage_rate = st.number_input(
-                f"Хранение 1 м³ (₽/сут):\n[{shop_key}]", min_value=0.0, value=float(current_storage_rate), step=5.0, key=f"storage_tab_input_{shop_key}_{index}"
-            )
+            new_storage_rate = st.number_input(f"Хранение 1 м³ (₽/сут):\n[{shop_key}]", min_value=0.0, value=float(current_storage_rate), step=5.0, key=f"storage_tab_input_{shop_key}_{index}")
             if new_storage_rate != current_storage_rate:
                 st.session_state.wms_storage_custom_rates[shop_key] = new_storage_rate
-                st.success(f"Тариф хранения для {shop_key} обновлен!")
                 st.rerun()
 
     st.write("---")
     st.markdown("### 📦 2. Персональная сетка тарифов за сборку FBS")
-    st.write("Настройте индивидуальную стоимость обработки 1 заказа для каждого личного кабинета селлера:")
-    
     col_rates_dynamic = st.columns(len(st.session_state.api_pulled_cards))
     for index, card in enumerate(st.session_state.api_pulled_cards):
         with col_rates_dynamic[index]:
             rate_key = f"{card['Магазин']}___{card['Артикул продавца']}"
             current_custom_rate = st.session_state.wms_fbs_custom_rates.get(rate_key, st.session_state.default_fbs_rate)
-            
-            new_fbs_rate = st.number_input(
-                f"Тариф FBS (₽/заказ):\n{card['Артикул продавца']} [{card['Магазин']}]", min_value=0.0, value=float(current_custom_rate), step=5.0, key=f"rates_tab_fbs_{rate_key}"
-            )
+            new_fbs_rate = st.number_input(f"Тариф FBS (₽/заказ):\n{card['Артикул продавца']} [{card['Магазин']}]", min_value=0.0, value=float(current_custom_rate), step=5.0, key=f"rates_tab_fbs_{rate_key}")
             if new_fbs_rate != current_custom_rate:
                 st.session_state.wms_fbs_custom_rates[rate_key] = new_fbs_rate
-                st.success(f"Тариф FBS для {card['Артикул продавца']} обновлен!")
                 st.rerun()
 
 with tab_api:
     st.subheader("🔑 Панель авторизации личных кабинетов маркетплейсов")
-    st.markdown("**Введите ключи интеграции API (4 магазина селлера)**")
     input_wb = st.text_input("Введите API Токен WB (тип 'Контент'):", type="password", value=st.session_state.wb_token_saved)
     input_oz_id = st.text_input("Введите Ozon Client-ID:", value=st.session_state.ozon_id_saved)
     input_oz_key = st.text_input("Введите Ozon API Key:", type="password", value=st.session_state.ozon_key_saved)
-    
     if st.button("💾 Активировать интеграцию по API", use_container_width=True):
-        st.session_state.wb_token_saved = input_wb
-        st.session_state.ozon_id_saved = input_oz_id
-        st.session_state.ozon_key_saved = input_oz_key
-        st.success("Интеграционные мосты успешно подключены к серверам Wildberries и Ozon!")
+        st.session_state.wb_token_saved, st.session_state.ozon_id_saved, st.session_state.ozon_key_saved = input_wb, input_oz_id, input_oz_key
+        st.success("Интеграционные мосты успешно подключены!")
         st.rerun()
