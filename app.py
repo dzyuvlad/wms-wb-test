@@ -24,7 +24,6 @@ if 'api_pulled_cards' not in st.session_state:
         {"Магазин": "Ozon (Кабинет 2)", "Артикул продавца": "OZ-DRY-CLEAN", "Название на витрине": "Сушилка + дезинфектор", "Баркод": "4607123456044", "Ручной остаток FBS на МП": 5},
     ]
 
-# Хранилище индивидуальных тарифов обработки FBS для связок
 if 'wms_fbs_custom_rates' not in st.session_state:
     st.session_state.wms_fbs_custom_rates = {}
 
@@ -32,6 +31,10 @@ today_date = datetime.date.today()
 
 if 'wms_receipt_history' not in st.session_state:
     st.session_state.wms_receipt_history = []
+
+# --- НОВАЯ БАЗА ДАННЫХ: ЖУРНАЛ ЗАФИКСИРОВАННЫХ ОПЛАТ (Клиент/Период) ---
+if 'wms_payment_ledger' not in st.session_state:
+    st.session_state.wms_payment_ledger = [] # Список словарей с оплаченными интервалами
 
 if 'm3_rate' not in st.session_state: st.session_state.m3_rate = 50.0
 if 'default_fbs_rate' not in st.session_state: st.session_state.default_fbs_rate = 35.0  
@@ -98,7 +101,6 @@ with tab_receive:
 
     st.write("---")
     st.subheader("📦 Шаг 3: Ввод принятой партии и Контроль кубатуры")
-    st.info("📏 **Контроль кубатуры**")
     
     col_qty1, col_qty2 = st.columns(2)
     with col_qty1:
@@ -125,7 +127,7 @@ with tab_receive:
 
     if st.session_state.get('show_confirmation_modal', False):
         st.markdown("---")
-        st.markdown("### ⚠️ ПОДТВЕРЖДЕНИЕ ПРИЕМКИ: Проверьте данные перед записью в систему!")
+        st.markdown("### ⚠️ ПОДТВЕРЖДЕНИЕ ПРИЕМКИ: Проверьте данные перед записью!")
         col_m1, col_m2 = st.columns(2)
         with col_m1:
             st.markdown(f"📂 **Физические параметры партии:**")
@@ -187,7 +189,10 @@ with tab_stocks:
     rows_unified = []
     total_warehouse_m3 = 0.0
     simulated_fbs_orders_count = 5  
-    total_fbs_processing_cost = 0.0 
+    total_fbs_processing_cost_global = 0.0 
+    
+    # Словарь для распределения стоимости сборки по магазинам
+    fbs_cost_by_shop = {c['Магазин']: 0.0 for c in st.session_state.api_pulled_cards}
     
     for ff_sku, data in st.session_state.wms_ff_inventory.items():
         total_live_fbs_on_marketplaces = 0
@@ -200,7 +205,12 @@ with tab_stocks:
                         total_live_fbs_on_marketplaces += mp_stock
                         rate_key = f"{card['Магазин']}___{card['Артикул продавца']}"
                         active_fbs_rate = st.session_state.wms_fbs_custom_rates.get(rate_key, st.session_state.default_fbs_rate)
-                        if mp_stock > 0: total_fbs_processing_cost += (simulated_fbs_orders_count * active_fbs_rate)
+                        
+                        if mp_stock > 0: 
+                            calc_cost = (simulated_fbs_orders_count * active_fbs_rate)
+                            total_fbs_processing_cost_global += calc_cost
+                            fbs_cost_by_shop[card['Магазин']] += calc_cost
+                            
                         connected_channels_list.append(f"SKU: {rule['Артикул продавца']} | {rule['Магазин']} ({mp_stock} шт. | {active_fbs_rate} ₽/зд)")
         
         phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders_count)
@@ -219,64 +229,143 @@ with tab_stocks:
         df_unified_matrix = pd.DataFrame(rows_unified)
         k1, k2, k3 = st.columns(3)
         with k1: st.metric("Всего позиций ФФ", len(df_unified_matrix))
-        with k2: st.metric("Всего штук на платном хранении (Физ + FBS)", int(df_unified_matrix["📦 НА ПОЛКАХ (Платное хранение, шт)"].sum()))
+        with k2: st.metric("Всего штук на платном хранении", int(df_unified_matrix["📦 НА ПОЛКАХ (Платное хранение, шт)"].sum()))
         with k3: st.metric("Активный объем (м³)", f"{total_warehouse_m3:.4f} м³")
         st.write("---")
-        st.dataframe(df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "Габариты упаковки (ЗАМЕР СКЛАДА)", "📦 НА ПОЛКАХ (Платное хранение, шт)", "Из них выставлено под FBS менеджером (шт)", "Тариф обработки (₽/шт)", "Уехало на FBO маркетплейсов", "Детализация связанных витрин селлера"]], use_container_width=True, hide_index=True)
+        st.dataframe(df_unified_matrix, use_container_width=True, hide_index=True)
     else: st.info("👋 Склад полностью пуст. Проведите приемку на первой вкладке.")
 with tab_billing:
-    st.subheader("📅 Финансовая отчетность по периодам (Календарь)")
+    st.subheader("📅 Учет дебиторской задолженности и закрытие актов оплат")
+    
+    # 1. СТРУКТУРНЫЙ ФИЛЬТР ПО МАГАЗИНАМ (КЛИЕНТАМ ФУЛФИЛМЕНТА)
+    unique_shops_list = list(set([c['Магазин'] for c in st.session_state.api_pulled_cards]))
+    selected_client_filter = st.selectbox("🌐 Фильтрация отчетов по конкретному клиенту (Личному кабинету):", ["Все подключенные кабинеты разом"] + unique_shops_list)
+    
     col_b1, col_b2 = st.columns(2)
     with col_b1:
-        custom_range = st.date_input("Выберите диапазон дат:", value=(st.session_state.start_period, st.session_state.end_period), max_value=today_date, key="calendar_billing")
+        custom_range = st.date_input("Выберите интересующий диапазон дат:", value=(st.session_state.start_period, st.session_state.end_period), max_value=today_date, key="calendar_billing")
         if isinstance(custom_range, tuple) and len(custom_range) == 2: st.session_state.start_period, st.session_state.end_period = custom_range
         days_in_period = (st.session_state.end_period - st.session_state.start_period).days + 1
-        st.success(f"Период расчета: **{days_in_period} дн.**")
+        st.info(f"📆 Выбранный период: **{st.session_state.start_period.strftime('%d.%m.%Y')} — {st.session_state.end_period.strftime('%d.%m.%Y')}** ({days_in_period} дн.)")
+    
     with col_b2:
-        st.write("##")
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            if rows_unified: pd.DataFrame(rows_unified).to_excel(writer, index=False, sheet_name='Текущие остатки')
-            else: pd.DataFrame(columns=["Склад пуст"]).to_excel(writer, index=False, sheet_name='Текущие остатки')
-        st.download_button(label="📥 Скачать сводный отчёт WMS в Excel", data=buffer.getvalue(), file_name="wms_3pl_report.xlsx", use_container_width=True)
+        st.markdown("**💳 Панель закрытия платежей (Менеджер 3PL)**")
+        st.write("Вы можете отметить текущий выбранный интервал как полностью оплаченный селлером:")
+        
+        # Интерактивная кнопка фиксации факта оплаты в Ledger-базу
+        if st.button("💳 Отметить этот период как ОПЛАЧЕННЫЙ для выбранного кабинета", use_container_width=True, type="secondary"):
+            target_ledger_client = "ALL" if selected_client_filter == "Все подключенные кабинеты разом" else selected_client_filter
+            st.session_state.wms_payment_ledger.append({
+                "Клиент": target_ledger_client,
+                "Старт": st.session_state.start_period,
+                "Конец": st.session_state.end_period
+            })
+            st.success(f"Акт оплаты успешно проведен! Период внесен в архив закрытых платежей.")
+            st.rerun()
+            
+        if st.button("🔄 Сбросить всю историю закрытых оплат (Обнулить долги)", use_container_width=True):
+            st.session_state.wms_payment_ledger = []
+            st.success("История платежей полностью очищена!")
+            st.rerun()
 
-    df_receipt_history = pd.DataFrame(st.session_state.wms_receipt_history) if st.session_state.wms_receipt_history else pd.DataFrame(columns=["Дата операции", "Время приемки", "Внутренний Артикул ФФ", "Разгружено коробов (шт)", "Принято товара (шт)", "Ставка за шт", "Сумма за разгрузку", "Сумма за обработку", "Итого за накладную", "Зафиксированный тариф разгрузки"])
-    total_boxes_unloaded_period, total_receipt_billing_period, calculated_unload_billing = 0, 0.0, 0.0
+    # ВЫЧИСЛЕНИЕ НАЧИСЛЕНИЙ ЖУРНАЛА ПРИХОДОВ С УЧЕТОМ КЛИЕНТСКОГО ФИЛЬТРА
+    df_receipt_history = pd.DataFrame(st.session_state.wms_receipt_history) if st.session_state.wms_receipt_history else pd.DataFrame(columns=["Дата операции", "Время приемки", "Внутренний Артикул ФФ", "Разгружено коробов (шт)", "Принято товара (шт)", "Ставка за шт", "Сумма за разгрузку", "Сумма за обработку", "Итого за накладную"])
+    
+    total_boxes_unloaded_period = 0
+    total_receipt_billing_period = 0.0
+    calculated_unload_billing = 0.0
+    
+    df_receipt_filtered = pd.DataFrame()
     if not df_receipt_history.empty:
+        # Сначала фильтруем по датам календаря
         df_receipt_filtered = df_receipt_history[(df_receipt_history['Дата операции'] >= st.session_state.start_period) & (df_receipt_history['Дата операции'] <= st.session_state.end_period)]
+        
+        # Если выбран конкретный клиент — фильтруем накладные, оставляя только те ФФ-артикулы, которые к нему привязаны
+        if selected_client_filter != "Все подключенные кабинеты разом":
+            allowed_ff_skus_for_client = [r['Внутренний артикул ФФ'] for r in st.session_state.wms_mapping_rules if r['Магазин'] == selected_client_filter]
+            df_receipt_filtered = df_receipt_filtered[df_receipt_filtered['Внутренний Артикул ФФ'].isin(allowed_ff_skus_for_client)]
+            
         if not df_receipt_filtered.empty:
             total_boxes_unloaded_period = df_receipt_filtered['Разгружено коробов (шт)'].sum()
             total_receipt_billing_period = df_receipt_filtered['Итого за накладную'].sum()
             calculated_unload_billing = df_receipt_filtered['Сумма за разгрузку'].sum()
+            
             st.write("---")
-            st.subheader("📋 Операционный журнал приходов")
+            st.subheader("📋 Срез операционного журнала приходов по выбранному фильтру")
             df_receipt_disp = df_receipt_filtered.copy()
             df_receipt_disp['Дата операции'] = df_receipt_disp['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
             st.dataframe(df_receipt_disp, use_container_width=True, hide_index=True)
 
+    # ВЫЧИСЛЕНИЕ СТОИМОСТИ ХРАНЕНИЯ И СБОРКИ С УЧЕТОМ СЕЛЛЕРА
+    if selected_client_filter != "Все подключенные кабинеты разом":
+        client_fbs_cost = fbs_cost_by_shop.get(selected_client_filter, 0.0)
+        # Вычисляем долю кубатуры хранения, которую занимает конкретный селлер
+        client_m3 = 0.0
+        for row in rows_unified:
+            if selected_client_filter in row["Детализация связанных витрин селлера"]:
+                # Извлекаем кубатуру конкретной позиции
+                for ff_sku, data in st.session_state.wms_ff_inventory.items():
+                    if ff_sku == row["Внутренний Код ФФ"]:
+                        u_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
+                        client_m3 += (u_m3 * row["📦 НА ПОЛКАХ (Платное хранение, шт)"])
+        active_storage_m3_pool = client_m3
+        active_fbs_pool = client_fbs_cost
+    else:
+        active_storage_m3_pool = total_warehouse_m3
+        active_fbs_pool = total_fbs_processing_cost_global
+
+    total_storage_cost_period = active_storage_m3_pool * st.session_state.m3_rate * days_in_period
+    
+    # 2. ПОЛНАЯ ГРЯЗНАЯ СУММА НАЧИСЛЕНИЙ (ДО ВЫЧЕТА ОПЛАТ)
+    raw_dirty_total_period = total_storage_cost_period + total_receipt_billing_period + active_fbs_pool
+
+    # --- УМНЫЙ АЛГОРИТМ УЧЕТА CRM-ОПЛАТ (ИСКЛЮЧЕНИЕ ИЗ ОБЩЕГО БАЛАНСА) ---
+    paid_already_amount = 0.0
+    
+    # Проверяем, пересекаются ли даты в календаре с архивом подтвержденных оплат
+    for paid_act in st.session_state.wms_payment_ledger:
+        if selected_client_filter == "Все подключенные кабинеты разом" or paid_act['Клиент'] == "ALL" or paid_act['Клиент'] == selected_client_filter:
+            # Если выбранный в календаре день входит в полностью оплаченный интервал — обнуляем его для счета
+            if paid_act['Старт'] <= st.session_state.start_period <= paid_act['Конец'] and paid_act['Старт'] <= st.session_state.end_period <= paid_act['Конец']:
+                paid_already_amount = raw_dirty_total_period
+
+    # Итоговый чистый неоплаченный остаток (Красный долг клиента)
+    net_unpaid_balance_period = max(0.0, raw_dirty_total_period - paid_already_amount)
+
     st.write("---")
-    st.subheader("🧾 Итоговый детализированный 3PL-счет за выбранный срок")
-    total_storage_cost_period = total_warehouse_m3 * st.session_state.m3_rate * days_in_period
-    grand_total_period = total_storage_cost_period + total_receipt_billing_period + total_fbs_processing_cost
+    st.subheader("🧾 Детализированный 3PL-акт начислений")
+    
     billing_period_data = [
-        {"Услуга фулфилмента": "Ответственное хранение объема груза на полках (Включая остатки FBS)", "База расчета": f"{total_warehouse_m3:.4f} м³ × {days_in_period} дн.", "Тарифная ставка": f"{st.session_state.m3_rate:.2f} ₽ за 1 м³ / сутки", "Итого к списанию (₽)": f"{total_storage_cost_period:.2f} ₽"},
-        {"Услуга фулфилмента": "Сборка, упаковка и маркировка заказов по FBS (Покабинетный обсчет)", "База расчета": "Заказы по привязанным ЛК", "Тарифная ставка": "Индивидуальная по каждому ЛК и SKU", "Итого к списанию (₽)": f"{total_fbs_processing_cost:.2f} ₽"},
-        {"Услуга фулфилмента": "Физическая разгрузка прибывших коробов с машины (Динамическая)", "База расчета": f"{total_boxes_unloaded_period} кор. зафиксировано", "Тарифная ставка": "Указанная при разгрузке акта", "Итого к списанию (₽)": f"{calculated_unload_billing:.2f} ₽"},
-        {"Услуга фулфилмента": "Поартикульная обработка, пересчет и стикерование груза", "База расчета": "Сумма по накладным из журнала операций", "Тарифная ставка": "Индивидуальная по каждому SKU", "Итого к списанию (₽)": f"{(total_receipt_billing_period - calculated_unload_billing):.2f} ₽"}
+        {"Услуга фулфилмента": "Ответственное хранение объема груза на полках (Включая остатки FBS)", "База расчета": f"{active_storage_m3_pool:.4f} м³ × {days_in_period} дн.", "Тарифная ставка": f"{st.session_state.m3_rate:.2f} ₽ за 1 м³ / сутки", "Итого начислено (₽)": f"{total_storage_cost_period:.2f} ₽"},
+        {"Услуга фулфилмента": "Сборка, упаковка и маркировка заказов по FBS (Покабинетный обсчет)", "База расчета": "Заказы по кабинету селлера", "Тарифная ставка": "Персональная покабинетная", "Итого начислено (₽)": f"{active_fbs_pool:.2f} ₽"},
+        {"Услуга фулфилмента": "Физическая разгрузка коробов (Динамическая в окне приемки)", "База расчета": f"{total_boxes_unloaded_period} кор.", "Тарифная ставка": "Из актов приходов", "Итого начислено (₽)": f"{calculated_unload_billing:.2f} ₽"},
+        {"Услуга фулфилмента": "Поартикульная обработка и пересчет груза приемщиком", "База расчета": "Штуки из актов", "Тарифная ставка": "Индивидуальная по SKU", "Итого начислено (₽)": f"{(total_receipt_billing_period - calculated_unload_billing):.2f} ₽"}
     ]
     st.table(pd.DataFrame(billing_period_data))
-    st.success(f"💰 **ОБЩИЙ СКВОЗНОЙ СЧЕТ К СУММАРНОМУ СПИСАНИЮ С БАЛАНСА СЕЛЛЕРА ЗА ПЕРИОД:** **{grand_total_period:.2f} ₽**")
-
+    
+    # Визуализация статуса платежей
+    c_m1, c_m2, c_m3 = st.columns(3)
+    with c_m1:
+        st.metric("Всего начислено за срок", f"{raw_dirty_total_period:.2f} ₽")
+    with c_m2:
+        st.metric("Уже оплачено клиентом", f"{paid_already_amount:.2f} ₽", delta_color="inverse")
+    with c_m3:
+        if net_unpaid_balance_period > 0:
+            st.metric("🔴 ОСТАТОК К ОПЛАТЕ (НЕОПЛАЧЕННЫЙ ДОЛГ)", f"{net_unpaid_balance_period:.2f} ₽")
+        else:
+            st.metric("🟢 СТАТУС ПЕРИОДА", "ПОЛНОСТЬЮ ОПЛАЧЕН")
+            
+    if st.session_state.wms_payment_ledger:
+        st.write("📂 **Действующие зафиксированные акты оплат в Ledger-базе фулфилмента:**")
+        st.table(pd.DataFrame(st.session_state.wms_payment_ledger))
 with tab_rates:
     st.subheader("💰 Управление глобальными базовыми тарифами склада")
-    st.markdown("**Настройка базовых глобальных ставок (подсказки для системы)**")
     st.session_state.m3_rate = st.number_input("Стоимость хранения 1 м³ груза в сутки (₽):", min_value=0.0, value=float(st.session_state.m3_rate), step=1.0)
-    st.session_state.default_fbs_rate = st.number_input("Базовая стоимость сборки одного заказа FBS по умолчанию (₽):", min_value=0.0, value=float(st.session_state.default_fbs_rate), step=1.0)
+    st.session_state.default_fbs_rate = st.number_input("Базовая сборка одного заказа FBS по умолчанию (₽):", min_value=0.0, value=float(st.session_state.default_fbs_rate), step=1.0)
     st.session_state.default_piece_rate = st.number_input("Базовый тариф обработки за 1 шт по умолчанию (₽):", min_value=0.0, value=float(st.session_state.default_piece_rate), step=0.5)
 
 with tab_api:
-    st.subheader("🔑 Панель авторизации личных кабинетов маркетплейсов")
-    st.markdown("**Введите ключи интеграции API (4 магазина селлера)**")
+    st.subheader("🔑 Панель авторизации личных кабинетов")
     input_wb = st.text_input("Введите API Токен WB (тип 'Контент'):", type="password", value=st.session_state.wb_token_saved)
     input_oz_id = st.text_input("Введите Ozon Client-ID:", value=st.session_state.ozon_id_saved)
     input_oz_key = st.text_input("Введите Ozon API Key:", type="password", value=st.session_state.ozon_key_saved)
@@ -284,5 +373,5 @@ with tab_api:
         st.session_state.wb_token_saved = input_wb
         st.session_state.ozon_id_saved = input_oz_id
         st.session_state.ozon_key_saved = input_oz_key
-        st.success("Интеграционные мосты успешно подключены к серверам Wildberries и Ozon!")
+        st.success("Интеграционные мосты успешно подключены!")
         st.rerun()
