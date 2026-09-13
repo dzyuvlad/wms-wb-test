@@ -24,8 +24,12 @@ if 'api_pulled_cards' not in st.session_state:
         {"Магазин": "Ozon (Кабинет 2)", "Артикул продавца": "OZ-DRY-CLEAN", "Название на витрине": "Сушилка + дезинфектор", "Баркод": "4607123456044", "Ручной остаток FBS на МП": 5, "Актуальный сток FBO на МП": 12},
     ]
 
+# Намертво фиксированные хранилища тарифов (не пересчитываются сами)
 if 'wms_fbs_custom_rates' not in st.session_state:
     st.session_state.wms_fbs_custom_rates = {}
+
+if 'wms_storage_custom_rates' not in st.session_state:
+    st.session_state.wms_storage_custom_rates = {}
 
 today_date = datetime.date.today()
 
@@ -46,9 +50,9 @@ if 'ozon_key_saved' not in st.session_state: st.session_state.ozon_key_saved = '
 if 'start_period' not in st.session_state: st.session_state.start_period = today_date - datetime.timedelta(days=6)
 if 'end_period' not in st.session_state: st.session_state.end_period = today_date
 
-# --- СТРУКТУРА ИЗ 5 ИЗОЛИРОВАННЫХ ВКЛАДОК ---
+# --- ИЗМЕНЕНО НАЗВАНИЕ ПЕРВОЙ ВКЛАДКИ ---
 tab_receive, tab_stocks, tab_billing, tab_rates, tab_api = st.tabs([
-    "📥 Приемка и Привязка по API", 
+    "Приемка на баланс ФФ", 
     "📊 Текущие Остатки (Матрица)", 
     "📅 Счета и 3PL-Биллинг", 
     "💰 Управление Тарифами Склада",
@@ -107,8 +111,7 @@ with tab_receive:
             destination_shop_move = st.selectbox("3. На какой ЛК перевесить остатки:", [s for s in all_available_shops if s != source_shop_move])
             
         if st.button("🔄 Выполнить внутренний переброс стока и пересчитать баланс", use_container_width=True):
-            if source_shop_move == "Нет привязок":
-                st.error("❌ Нечего перемещать!")
+            if source_shop_move == "Нет привязок": st.error("❌ Нечего перемещать!")
             else:
                 for rule in st.session_state.wms_mapping_rules:
                     if rule['Внутренний артикул ФФ'] == move_ff_target and rule['Магазин'] == source_shop_move:
@@ -146,10 +149,10 @@ with tab_receive:
 
     if st.session_state.get('show_confirmation_modal', False):
         st.markdown("---")
-        st.markdown("### ⚠️ ПОДТВЕРЖДЕНИЕ ПРИЕМКИ: Проверьте данные перед записью в систему!")
+        st.markdown("### ⚠️ ПОДТВЕРЖДЕНИЕ ПРИЕМКИ")
         col_m1, col_m2 = st.columns(2)
         with col_m1:
-            st.markdown(f"📂 **Физические параметры партии:**\n* Внутренний код: `{target_ff_sku}`\n* Описание: **{ff_name}**\n* Коробки: `{input_boxes}`\n## ИТОГО: **{calculated_total_pcs} шт.**")
+            st.markdown(f"📂 **Параметры партии:**\n* Внутренний код: `{target_ff_sku}`\n* Описание: **{ff_name}**\n* Коробки: `{input_boxes}`\n## ИТОГО: **{calculated_total_pcs} шт.**")
         with col_m2:
             if selected_labels:
                 for lbl in selected_labels: st.markdown(f"* `{lbl}`")
@@ -184,7 +187,6 @@ with tab_receive:
 with tab_stocks:
     st.subheader("📊 Оперативная мультиканальная матрица Единого Стока")
     
-    # 1. ПОКАБИНЕТНЫЙ ФИЛЬТР В КАРТОЧКЕ ОСТАТКОВ
     unique_shops_for_matrix = list(set([c['Магазин'] for c in st.session_state.api_pulled_cards]))
     selected_shop_view = st.selectbox("🌐 Выберите Личный Кабинет для просмотра складских остатков:", ["Показать все магазины списком"] + unique_shops_for_matrix, key="matrix_shop_filter")
     
@@ -232,8 +234,17 @@ with tab_stocks:
             continue
             
         phys_stock_on_shelves = max(0, data['physical_stock'] - data['fbo_allocated'] - simulated_fbs_orders_count)
-        total_billable_pcs_including_fbs = phys_stock_on_shelves + total_live_fbs_on_marketplaces
+        total_live_fbs_for_storage = total_live_fbs_on_marketplaces
         
+        # Получаем индивидуальный тариф хранения для текущего ЛК (подтянется из вкладки тарифов)
+        linked_shop_for_sku = "Показать все магазины списком"
+        for r in st.session_state.wms_mapping_rules:
+            if r['Внутренний артикул ФФ'] == ff_sku:
+                linked_shop_for_sku = r['Магазин']
+                break
+        active_m3_rate = st.session_state.wms_storage_custom_rates.get(linked_shop_for_sku, st.session_state.m3_rate)
+        
+        total_billable_pcs_including_fbs = phys_stock_on_shelves + total_live_fbs_for_storage
         unit_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
         total_sku_m3 = unit_m3 * total_billable_pcs_including_fbs
         total_warehouse_m3 += total_sku_m3
@@ -242,14 +253,8 @@ with tab_stocks:
         current_sku_rate = data.get('piece_rate', st.session_state.default_piece_rate)
         
         rows_unified.append({
-            "Внутренний Код ФФ": ff_sku, 
-            "Описание товара": data['name'], 
-            "Габариты (ЗАМЕР СКЛАДА)": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
-            "📦 На складе ФФ (Платное хранение, шт)": phys_stock_on_shelves, 
-            "Текущий FBS на МП (шт)": total_live_fbs_on_marketplaces, 
-            "Сток FBO на МП (Актуально, шт)": total_live_fbo_on_marketplaces, 
-            "Тариф обработки (₽/шт)": f"{current_sku_rate:.2f} ₽", 
-            "Детализация связанных витрин селлера": channels_str
+            "Внутренний Код ФФ": ff_sku, "Описание товара": data['name'], "Габариты (ЗАМЕР СКЛАДА)": f"{data['length_cm']}x{data['width_cm']}x{data['height_cm']} см",
+            "📦 На складе ФФ (Платное хранение, шт)": phys_stock_on_shelves, "Текущий FBS на МП (шт)": total_live_fbs_on_marketplaces, "Сток FBO на МП (Актуально, шт)": total_live_fbo_on_marketplaces, "Тариф обработки (₽/шт)": f"{current_sku_rate:.2f} ₽", "Детализация связанных витрин селлера": channels_str
         })
         
     if rows_unified:
@@ -260,8 +265,7 @@ with tab_stocks:
         with k3: st.metric("Платный объем на полках (м³)", f"{total_warehouse_m3:.4f} м³")
         st.write("---")
         st.dataframe(df_unified_matrix[["Внутренний Код ФФ", "Описание товара", "Габариты (ЗАМЕР СКЛАДА)", "📦 На складе ФФ (Платное хранение, шт)", "Текущий FBS на МП (шт)", "Сток FBO на МП (Актуально, шт)", "Тариф обработки (₽/шт)", "Детализация связанных витрин селлера"]], use_container_width=True, hide_index=True)
-    else: 
-        st.info("👋 В выбранном личном кабинете нет активных остатков на складе. Проведите приемку или скорректируйте маппинг.")
+    else: st.info("👋 В выбранном личном кабинете нет активных остатков на складе.")
 with tab_billing:
     st.subheader("📅 Учет дебиторской задолженности и закрытие актов оплат")
     
@@ -313,27 +317,48 @@ with tab_billing:
             df_receipt_disp['Дата операции'] = df_receipt_disp['Дата операции'].apply(lambda x: x.strftime('%Y-%m-%d'))
             st.dataframe(df_receipt_disp, use_container_width=True, hide_index=True)
 
+    # --- ИСПРАВЛЕННЫЙ РАСЧЕТ ХРАНЕНИЯ С УЧЕТОМ ЗАМОРОЖЕННЫХ ПОКАБИНЕТНЫХ ТАРИФОВ ---
+    total_storage_cost_period = 0.0
+    
     if selected_client_filter != "Все подключенные кабинеты разом":
         client_fbs_cost = fbs_cost_by_shop.get(selected_client_filter, 0.0)
         client_m3 = 0.0
+        # Ищем закрепленную ставку хранения для конкретного ЛК
+        client_storage_rate = st.session_state.wms_storage_custom_rates.get(selected_client_filter, st.session_state.m3_rate)
+        
         for row in rows_unified:
             if selected_client_filter in row["Детализация связанных витрин селлера"]:
                 for ff_sku, data in st.session_state.wms_ff_inventory.items():
                     if ff_sku == row["Внутренний Код ФФ"]:
                         u_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
                         client_m3 += (u_m3 * row["📦 На складе ФФ (Платное хранение, шт)"])
+                        
+        total_storage_cost_period = client_m3 * client_storage_rate * days_in_period
         active_storage_m3_pool = client_m3
         active_fbs_pool = client_fbs_cost
+        display_storage_rate_str = f"{client_storage_rate:.2f} ₽ за 1 м³ / сутки"
     else:
+        # Если выбраны все кабинеты, то суммируем хранение по каждому ЛК индивидуально согласно их тарифам
         active_storage_m3_pool = total_warehouse_m3
         active_fbs_pool = total_fbs_processing_cost_global
+        display_storage_rate_str = "Индивидуальная по каждому ЛК"
+        
+        for shop in unique_shops_list:
+            shop_m3 = 0.0
+            shop_storage_rate = st.session_state.wms_storage_custom_rates.get(shop, st.session_state.m3_rate)
+            for row in rows_unified:
+                if shop in row["Детализация связанных витрин селлера"]:
+                    for ff_sku, data in st.session_state.wms_ff_inventory.items():
+                        if ff_sku == row["Внутренний Код ФФ"]:
+                            u_m3 = (data['length_cm'] * data['width_cm'] * data['height_cm']) / 1000000
+                            shop_m3 += (u_m3 * row["📦 На складе ФФ (Платное хранение, шт)"])
+            total_storage_cost_period += (shop_m3 * shop_storage_rate * days_in_period)
 
-    total_storage_cost_period = active_storage_m3_pool * st.session_state.m3_rate * days_in_period
     raw_dirty_total_period = total_storage_cost_period + total_receipt_billing_period + active_fbs_pool
 
     paid_already_amount = 0.0
     for paid_act in st.session_state.wms_payment_ledger:
-        if selected_client_filter == "Все подключенные кабинеты разом" or paid_act['Clean'] == "ALL" or paid_act['Клиент'] == selected_client_filter:
+        if selected_client_filter == "Все подключенные кабинеты разом" or paid_act['Клиент'] == "ALL" or paid_act['Клиент'] == selected_client_filter:
             if paid_act['Старт'] <= st.session_state.start_period <= paid_act['Конец'] and paid_act['Старт'] <= st.session_state.end_period <= paid_act['Конец']:
                 paid_already_amount = raw_dirty_total_period
 
@@ -342,7 +367,7 @@ with tab_billing:
     st.write("---")
     st.subheader("🧾 Детализированный 3PL-акт начислений")
     billing_period_data = [
-        {"Услуга фулфилмента": "Ответственное хранение объема груза", "База расчета": f"{active_storage_m3_pool:.4f} м³ × {days_in_period} дн.", "Тарифная ставка": f"{st.session_state.m3_rate:.2f} ₽ за 1 м³ / сутки", "Итого начислено (₽)": f"{total_storage_cost_period:.2f} ₽"},
+        {"Услуга фулфилмента": "Ответственное хранение объема груза", "База расчета": f"{active_storage_m3_pool:.4f} м³ × {days_in_period} дн.", "Тарифная ставка": display_storage_rate_str, "Итого начислено (₽)": f"{total_storage_cost_period:.2f} ₽"},
         {"Услуга фулфилмента": "Сборка, упаковка и маркировка заказов по FBS", "База расчета": "Заказы по кабинету селлера", "Тарифная ставка": "Персональная покабинетная", "Итого начислено (₽)": f"{active_fbs_pool:.2f} ₽"},
         {"Услуга фулфилмента": "Физическая разгрузка коробов (Динамическая)", "База расчета": f"{total_boxes_unloaded_period} кор.", "Тарифная ставка": "Из актов приходов", "Итого начислено (₽)": f"{calculated_unload_billing:.2f} ₽"},
         {"Услуга фулфилмента": "Поартикульная обработка и пересчет груза", "База расчета": "Штуки из актов", "Тарифная ставка": "Индивидуальная по SKU", "Итого начислено (₽)": f"{(total_receipt_billing_period - calculated_unload_billing):.2f} ₽"}
@@ -357,18 +382,43 @@ with tab_billing:
         else: st.metric("🟢 СТАТУС ПЕРИОДА", "ПОЛНОСТЬЮ ОПЛАЧЕН")
 with tab_rates:
     st.subheader("💰 Управление тарифами склада и покабинетная сетка")
+    st.info("💡 **Железная фиксация цен:** Все внесенные ниже изменения тарифов мгновенно сохраняются и будут действовать до тех пор, пока вы не скорректируете их вручную.")
     
-    st.markdown("### 1. Персональная сетка тарифов за сборку FBS")
+    # 1. СЕТКА ХРАНЕНИЯ С РАЗБИВКОЙ ПО КЛИЕНТАМ (ВЫНЕСЕНО СЮДА)
+    st.markdown("### 🏬 1. Помагазинный тариф ответственного хранения")
+    st.write("Задайте индивидуальную стоимость хранения 1 кубического метра груза в сутки (₽) для каждого кабинета:")
+    
+    col_storage_dynamic = st.columns(len(st.session_state.api_pulled_cards))
+    for index, card in enumerate(st.session_state.api_pulled_cards):
+        with col_storage_dynamic[index]:
+            shop_key = card['Магазин']
+            current_storage_rate = st.session_state.wms_storage_custom_rates.get(shop_key, st.session_state.m3_rate)
+            
+            # Ручное изменение стоимости хранения по конкретному ЛК
+            new_storage_rate = st.number_input(
+                f"Хранение 1 м³ (₽/сут):\n[{shop_key}]",
+                min_value=0.0,
+                value=float(current_storage_rate),
+                step=5.0,
+                key=f"storage_tab_input_{shop_key}_{index}"
+            )
+            if new_storage_rate != current_storage_rate:
+                st.session_state.wms_storage_custom_rates[shop_key] = new_storage_rate
+                st.success(f"Тариф хранения для {shop_key} обновлен!")
+                st.rerun()
+
+    st.write("---")
+    
+    # 2. СЕТКА FBS С РАЗБИВКОЙ ПО КЛИЕНТАМ
+    st.markdown("### 📦 2. Персональная сетка тарифов за сборку FBS")
     st.write("Настройте индивидуальную стоимость обработки 1 заказа для каждого личного кабинета селлера:")
     
-    # ПЕРЕНЕСЕНО СЮДА: Сетка выставляется один раз в тарифах для порядка в интерфейсе
     col_rates_dynamic = st.columns(len(st.session_state.api_pulled_cards))
     for index, card in enumerate(st.session_state.api_pulled_cards):
         with col_rates_dynamic[index]:
             rate_key = f"{card['Магазин']}___{card['Артикул продавца']}"
             current_custom_rate = st.session_state.wms_fbs_custom_rates.get(rate_key, st.session_state.default_fbs_rate)
             
-            # Поле ввода индивидуального прайса за заказ по маркетплейсу
             new_fbs_rate = st.number_input(
                 f"Тариф FBS (₽/заказ):\n{card['Артикул продавца']} [{card['Магазин']}]", 
                 min_value=0.0, 
@@ -378,13 +428,8 @@ with tab_rates:
             )
             if new_fbs_rate != current_custom_rate:
                 st.session_state.wms_fbs_custom_rates[rate_key] = new_fbs_rate
+                st.success(f"Тариф FBS для {card['Артикул продавца']} обновлен!")
                 st.rerun()
-                
-    st.write("---")
-    st.markdown("### 2. Базовые глобальные ставки (подсказки для системы)")
-    st.session_state.m3_rate = st.number_input("Стоимость хранения 1 м³ груза в сутки (₽):", min_value=0.0, value=float(st.session_state.m3_rate), step=1.0)
-    st.session_state.default_fbs_rate = st.number_input("Базовая сборка одного заказа FBS по умолчанию (₽):", min_value=0.0, value=float(st.session_state.default_fbs_rate), step=1.0)
-    st.session_state.default_piece_rate = st.number_input("Базовый тариф обработки за 1 шт по умолчанию (₽):", min_value=0.0, value=float(st.session_state.default_piece_rate), step=0.5)
 
 with tab_api:
     st.subheader("🔑 Панель авторизации личных кабинетов маркетплейсов")
